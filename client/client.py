@@ -1,10 +1,20 @@
-"""Secure chat client: ECDH handshake + AES-GCM encrypted messaging.
+"""Secure chat client: login/registration + ECDH handshake + AES-GCM messaging.
 
-Connects to the relay server, then performs an ECDH (X25519) handshake with a
-chosen peer (see crypto_engine/dh_exchange.py and the README's "How the
-handshake works" section). Every chat message is encrypted with
+Phase 4 adds an authentication step in front of everything else: on startup
+the user registers a new account or logs into an existing one (username +
+password, password read with getpass so it is never echoed to the
+terminal). Only after the server confirms success does the client proceed to
+the existing Phase 3 flow: an ECDH (X25519) handshake with a chosen peer
+(see crypto_engine/dh_exchange.py and the README's "How the handshake works"
+section), after which every chat message is encrypted with
 crypto_engine/aes_gcm.py before it is sent, and decrypted after it is
-received -- the server only ever sees the encrypted envelope.
+received -- the server only ever sees the encrypted chat envelope.
+
+SECURITY NOTE: the register/login envelope carries the password itself (so
+the server can hash/check it) over the plain TCP socket -- that leg is not
+yet encrypted at this phase. See the note in server/server.py and the
+README's Phase 4 section: this is a known, deliberate gap closed by Phase 6
+(TLS), not something patched around here.
 
 Handshake initiation rule: to avoid both sides racing to start a handshake at
 once, only the client whose username sorts lexicographically *lower* sends
@@ -18,8 +28,10 @@ fields (public keys, nonce, ciphertext, tag) are base64-encoded for JSON.
 
 import argparse
 import base64
+import getpass
 import json
 import os
+import queue
 import socket
 import sys
 import threading
@@ -41,12 +53,34 @@ def unb64(text):
     return base64.b64decode(text.encode("ascii"))
 
 
+def read_password(prompt="Password: "):
+    """Read a password without echoing it, when a real terminal is attached.
+
+    On a real terminal this is exactly getpass.getpass(). When stdin is
+    redirected/piped (e.g. a scripted demo or test harness), Windows'
+    getpass implementation reads straight from the console via msvcrt and
+    hangs forever rather than falling back -- unlike Unix's getpass, which
+    already degrades gracefully to a plain stdin read in that case. This
+    mirrors that same graceful fallback on both platforms.
+    """
+    if sys.stdin.isatty():
+        return getpass.getpass(prompt)
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    line = sys.stdin.readline()
+    return line.rstrip("\n") if line else ""
+
+
 class SecureChatClient:
     def __init__(self, sock, username, peer):
         self.sock = sock
         self.username = username
         self.peer = peer
         self.stop_event = threading.Event()
+
+        # Results of "register_result"/"login_result" envelopes, handed from
+        # the receiver thread to whoever is blocked waiting in authenticate().
+        self.auth_results = queue.Queue()
 
         # Handshake / session state, guarded by _lock since the receiver
         # thread and the send loop both touch it.
@@ -61,6 +95,14 @@ class SecureChatClient:
             self.sock.sendall((json.dumps(envelope) + "\n").encode("utf-8"))
         except OSError:
             self.stop_event.set()
+
+    # --- authentication --------------------------------------------------
+
+    def register(self, username, password):
+        self.send_envelope({"type": "register", "username": username, "password": password})
+
+    def login(self, username, password):
+        self.send_envelope({"type": "login", "username": username, "password": password})
 
     # --- handshake -----------------------------------------------------
 
@@ -183,7 +225,9 @@ class SecureChatClient:
                         continue
 
                     etype = envelope.get("type")
-                    if etype == "system":
+                    if etype in ("register_result", "login_result"):
+                        self.auth_results.put(envelope)
+                    elif etype == "system":
                         print(f"\r{envelope.get('text', '')}\n> ", end="", flush=True)
                     elif etype == "roster":
                         if self.peer in envelope.get("users", []) and self.username < self.peer:
@@ -203,26 +247,66 @@ class SecureChatClient:
             if not self.stop_event.is_set():
                 print("\r[!] Disconnected from server.", flush=True)
             self.stop_event.set()
+            # Unblock anyone still waiting on an auth result.
+            self.auth_results.put(None)
+
+
+def authenticate(client):
+    """Interactively register or log in over an already-connected client.
+
+    Retries on failure (wrong password, username taken, etc.) until success,
+    the user gives up, or the connection drops. Returns True on success.
+    """
+    while not client.stop_event.is_set():
+        choice = input("1) Register  2) Login  (or 'q' to quit): ").strip().lower()
+        if choice in ("q", "quit"):
+            return False
+        if choice not in ("1", "2", "register", "login"):
+            print("Please enter 1, 2, or q.")
+            continue
+
+        username = input("Username: ").strip()
+        if not username:
+            print("Username cannot be empty.")
+            continue
+        password = read_password("Password: ")
+        if not password:
+            print("Password cannot be empty.")
+            continue
+
+        client.username = username
+        if choice in ("1", "register"):
+            client.register(username, password)
+        else:
+            client.login(username, password)
+
+        result = client.auth_results.get()
+        if result is None:
+            print("[!] Connection lost during authentication.")
+            return False
+        if result.get("success"):
+            print(f"[*] {result.get('reason', 'Success.')}")
+            return True
+        print(f"[!] {result.get('reason', 'Authentication failed.')} Please try again.")
+    return False
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Secure ECDH + AES-GCM chat client")
+    parser = argparse.ArgumentParser(description="Secure login + ECDH + AES-GCM chat client")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--username", help="skip the username prompt")
+    parser.add_argument("--username", help="skip the username prompt during register/login")
+    parser.add_argument("--password", help="skip the password prompt (testing/demo only; "
+                                             "prefer the interactive getpass prompt normally)")
+    parser.add_argument("--register", action="store_true",
+                         help="register a new account instead of logging in "
+                              "(used with --username/--password to skip prompts)")
     parser.add_argument("--peer", help="username of the peer to chat securely with")
     args = parser.parse_args()
 
-    username = args.username or input("Username: ").strip()
-    if not username:
-        print("A username is required.")
-        sys.exit(1)
     peer = args.peer or input("Peer username to chat securely with: ").strip()
     if not peer:
         print("A peer username is required.")
-        sys.exit(1)
-    if peer == username:
-        print("Peer must be a different user than yourself.")
         sys.exit(1)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -232,12 +316,41 @@ def main():
         print(f"[!] Could not connect to {args.host}:{args.port} -- {exc}")
         sys.exit(1)
 
-    client = SecureChatClient(sock, username, peer)
-    client.send_envelope({"type": "hello", "username": username})
-    print(f"[*] Connected to {args.host}:{args.port} as {username}. "
-          f"Chatting securely with {peer}. Type a message and press Enter (Ctrl-C to quit).")
-
+    client = SecureChatClient(sock, username=None, peer=peer)
     threading.Thread(target=client.receive_loop, daemon=True).start()
+
+    if args.username and args.password:
+        # Non-interactive path, for scripted demos/tests only.
+        client.username = args.username
+        if args.register:
+            client.register(args.username, args.password)
+        else:
+            client.login(args.username, args.password)
+        result = client.auth_results.get()
+        authenticated = bool(result and result.get("success"))
+        if result:
+            print(f"[{'*' if authenticated else '!'}] {result.get('reason')}")
+    else:
+        authenticated = authenticate(client)
+
+    if not authenticated or client.stop_event.is_set():
+        print("[!] Not authenticated -- exiting.")
+        client.stop_event.set()
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        sock.close()
+        sys.exit(1)
+
+    if peer == client.username:
+        print("Peer must be a different user than yourself.")
+        client.stop_event.set()
+        sock.close()
+        sys.exit(1)
+
+    print(f"[*] Logged in as {client.username}. Chatting securely with {peer}. "
+          f"Type a message and press Enter (Ctrl-C to quit).")
 
     try:
         while not client.stop_event.is_set():

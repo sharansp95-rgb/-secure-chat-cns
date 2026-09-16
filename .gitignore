@@ -5,3 +5,7 @@ venv/
 *.pcap
 *.pcapng
 .env
+
+# Local user store: holds real hashed credentials from testing, never
+# committed. See server/user_store.py.
+data/

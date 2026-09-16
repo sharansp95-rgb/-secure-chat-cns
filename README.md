@@ -12,7 +12,8 @@ Work in progress.
 - **Phase 1 — baseline plaintext socket chat:** done
 - **Phase 2 — AES-256-GCM crypto engine (standalone, unit-tested):** done
 - **Phase 3 — ECDH (X25519) key exchange, wired into live chat encryption:** done
-- Phase 4+ (identity/login, digital signatures, TLS, capture/replay tests): not started
+- **Phase 4 — login, identity, and PBKDF2 password hashing:** done
+- Phase 5+ (digital signatures, TLS, capture/replay tests, final report): not started
 
 ## How to run
 
@@ -34,14 +35,29 @@ Defaults to `127.0.0.1:5000`; override with `--host` / `--port`.
 terminals):
 
 ```
-python client/client.py --username alice --peer bob
-python client/client.py --username bob --peer alice
+python client/client.py --peer bob
+python client/client.py --peer alice
 ```
 
-As soon as both are online, they automatically perform the ECDH handshake described
+Each client first asks you to **register** a new account or **login** to an existing
+one — pick `1) Register` the first time for each username, `2) Login` afterward. The
+password prompt hides your input (it won't echo to the terminal). Once both peers are
+authenticated and online, they automatically perform the ECDH handshake described
 below, then every message either types is AES-256-GCM encrypted before it leaves the
 client and decrypted on arrival. `--host` / `--port` point at a non-default server;
-omit `--username`/`--peer` to be prompted interactively.
+omit `--peer` to be prompted interactively.
+
+Registered accounts (as PBKDF2 password hashes only — see below) persist in
+`data/users.json`, which is gitignored since it holds real credentials from local
+testing.
+
+> **Security gap (closed in Phase 6):** the register/login envelope carries the
+> password itself, over a socket that isn't encrypted yet at this phase — the AES-GCM
+> session key from Phase 3 only protects the chat payload *between two peers*, after
+> their handshake, and doesn't exist yet at login time. That means a network observer
+> between a client and the server could currently see a password in transit. This is a
+> known, deliberate gap: wrapping the whole client↔server socket in TLS is Phase 6's
+> job, and we are not attempting a workaround here.
 
 ## How the handshake works
 
@@ -69,7 +85,10 @@ One JSON object per line (newline-terminated). Every envelope has a `"type"` fie
 
 | type | direction | carries |
 |---|---|---|
-| `hello` | client → server | `username` |
+| `register` | client → server | `username`, `password` |
+| `register_result` | server → client | `success`, `reason` |
+| `login` | client → server | `username`, `password` |
+| `login_result` | server → client | `success`, `reason` |
 | `roster` | server → client | list of currently-online usernames |
 | `system` | server → client | human-readable join/leave/error text |
 | `user_joined` | server → client | `username` of a newly-connected peer |
@@ -77,9 +96,11 @@ One JSON object per line (newline-terminated). Every envelope has a `"type"` fie
 | `handshake_response` | client ↔ client (via server) | `from`, `to`, `pubkey` (base64, 32 raw bytes) |
 | `chat` | client ↔ client (via server) | `from`, `to`, `nonce`, `ciphertext`, `tag` (all base64) |
 
-The server routes `handshake_init` / `handshake_response` / `chat` envelopes to the
-named `to` recipient only, based on the sender's own claimed `from` field; it never
-inspects or needs to understand their payload beyond that routing.
+A connection must complete a successful `register` or `login` exchange before the
+server admits it to the roster or accepts any handshake/chat envelope from it. The
+server routes `handshake_init` / `handshake_response` / `chat` envelopes to the named
+`to` recipient only, based on the sender's own claimed `from` field; it never inspects
+or needs to understand their payload beyond that routing.
 
 ## Running the tests
 
@@ -114,3 +135,19 @@ priv_a, pub_a = generate_keypair()
 priv_b, pub_b = generate_keypair()
 assert compute_shared_key(priv_a, pub_b) == compute_shared_key(priv_b, pub_a)
 ```
+
+`auth/password_hash.py` — PBKDF2-HMAC-SHA256 password hashing (Phase 4), 200,000+
+iterations, a fresh random salt per password, and a constant-time comparison
+(`hmac.compare_digest`) on verify:
+
+```python
+from auth.password_hash import hash_password, verify_password
+
+stored = hash_password("correct horse battery staple")
+# stored == "pbkdf2_sha256$200000$<salt_b64>$<hash_b64>"
+assert verify_password("correct horse battery staple", stored)
+assert not verify_password("wrong guess", stored)
+```
+
+`server/user_store.py` persists only that encoded hash string per username, in
+`data/users.json` — the plaintext password is never written to disk.
