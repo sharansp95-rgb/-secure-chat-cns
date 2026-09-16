@@ -1,1 +1,4 @@
-# Phase 1 uses only the Python 3 standard library.
+# Phase 1 (socket chat) uses only the Python 3 standard library.
+# Phase 2 onward:
+pycryptodome==3.23.0
+pytest==9.1.1
