@@ -71,6 +71,18 @@ exact repeat even if it somehow fell within the timestamp bounds.
 Wire format: one JSON object per line, matching server/server.py. Binary
 fields (public keys, nonce, ciphertext, tag, signatures) are base64-encoded
 for JSON.
+
+Stage 8 (GUI): SecureChatClient's logic methods (register/login, handshake,
+send/receive) were always separate from the terminal-specific presentation
+code (authenticate()/main(), which use input()/print()) -- the GUI reuses
+SecureChatClient directly rather than those two functions. What SecureChatClient
+itself mixed in was print() calls *inside* its own logic methods (handshake
+progress, warnings, incoming messages). Rather than rip those out (risking
+subtly changing the terminal client's behavior) an optional structured
+`event_callback` was added: every one of those print() sites also emits a
+(kind, data) event through it if one was supplied. The terminal client
+doesn't pass one, so it behaves byte-for-byte as before; gui/chat_gui.py
+passes one to drive its own display instead of scraping stdout.
 """
 
 import argparse
@@ -217,11 +229,19 @@ def read_password(prompt="Password: "):
 
 
 class SecureChatClient:
-    def __init__(self, sock, username, peer):
+    def __init__(self, sock, username, peer, event_callback=None):
         self.sock = sock
         self.username = username
         self.peer = peer
         self.stop_event = threading.Event()
+
+        # Optional structured hook for a non-terminal presentation layer
+        # (see gui/chat_gui.py): called as event_callback(kind: str, data:
+        # dict) alongside every existing print() in this class, wrapped
+        # defensively so a bug in a GUI handler can never break the
+        # underlying protocol/crypto logic. None (the default) makes this a
+        # complete no-op -- the terminal client's behavior is unchanged.
+        self.on_event = event_callback
 
         # Results of "register_result"/"login_result" envelopes, handed from
         # the receiver thread to whoever is blocked waiting in authenticate().
@@ -266,11 +286,26 @@ class SecureChatClient:
         # Guarded by _lock along with everything else above.
         self._seen_nonces = {}
 
+    def _emit(self, kind, **data):
+        """Notify the presentation layer of a structured event, if one is
+        listening. Never allowed to raise into the caller -- a broken GUI
+        handler must not be able to break the underlying protocol logic."""
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(kind, data)
+        except Exception:
+            pass
+
     def send_envelope(self, envelope):
         try:
             self.sock.sendall((json.dumps(envelope) + "\n").encode("utf-8"))
         except OSError:
             self.stop_event.set()
+            return
+        # Wire-log hook: every envelope this client puts on the wire, raw --
+        # this is what a "what's actually crossing the network" panel shows.
+        self._emit("envelope_sent", envelope=envelope)
 
     # --- authentication --------------------------------------------------
 
@@ -340,6 +375,7 @@ class SecureChatClient:
             self.send_envelope({"type": "get_pubkey", "username": self.peer})
         print(f"\r[*] Waiting on {self.peer}'s public key to verify an incoming "
               f"handshake message...\n> ", end="", flush=True)
+        self._emit("handshake_waiting", peer=self.peer)
 
     def _replay_deferred_handshake(self):
         """Called from receive_loop right after peer_public_key is (or
@@ -410,6 +446,7 @@ class SecureChatClient:
             self._pending_private_key = private_key
 
         print(f"\r[*] Starting key exchange with {self.peer}...\n> ", end="", flush=True)
+        self._emit("handshake_started", peer=self.peer)
         self.send_envelope({
             "type": "handshake_init",
             "from": self.username,
@@ -429,6 +466,7 @@ class SecureChatClient:
               f"was derived -- this connection is NOT secure. Possible MITM; do not "
               f"trust any messages claiming to be from {self.peer} right now.\n> ",
               end="", flush=True)
+        self._emit("handshake_aborted", peer=self.peer, reason=reason)
 
     def _handle_handshake_init(self, envelope):
         if self.peer_public_key is None:
@@ -506,6 +544,7 @@ class SecureChatClient:
         print(f"\r[*] Secure session established with {self.peer} "
               f"(AES-256-GCM key derived via ECDH, authenticated by RSA signature).",
               end="", flush=True)
+        self._emit("handshake_established", peer=self.peer)
         # Phase 7a "check key fingerprints" mitigation: print a short,
         # human-readable fingerprint of the peer's RSA public key. Two people
         # can read this aloud to each other (voice call, in person) to
@@ -516,6 +555,7 @@ class SecureChatClient:
             print(f"\n[*] {self.peer}'s key fingerprint: {fp}\n"
                   f"    Verify this out-of-band (voice/in person) with {self.peer} "
                   f"to rule out a man-in-the-middle.\n> ", end="", flush=True)
+            self._emit("peer_fingerprint", peer=self.peer, fingerprint=fp)
         else:
             print("\n> ", end="", flush=True)
         for text in queued:
@@ -559,6 +599,10 @@ class SecureChatClient:
             "ciphertext": b64(box["ciphertext"]),
             "tag": b64(box["tag"]),
         })
+        # The terminal client doesn't need an echo of what the user just
+        # typed (it's already visible in their own terminal); a GUI's chat
+        # panel does, since there's no other record of "what I sent".
+        self._emit("message_sent", peer=self.peer, message=text, timestamp=timestamp)
 
     def send_message(self, text):
         with self._lock:
@@ -568,6 +612,7 @@ class SecureChatClient:
         if not ready:
             self.initiate_handshake()
             print("[*] Message queued until the secure session is ready.")
+            self._emit("message_queued", peer=self.peer, message=text)
             return
         self._encrypt_and_send(text)
 
@@ -578,6 +623,8 @@ class SecureChatClient:
         if key is None:
             print(f"\r[!] Received an encrypted message from {sender} "
                   f"before a session key was established -- dropped.\n> ", end="", flush=True)
+            self._emit("message_rejected", sender=sender, reason="no_session_key",
+                       detail="received before a session key was established")
             return
 
         # Decrypt first (unchanged Phase 3 flow) ...
@@ -592,6 +639,8 @@ class SecureChatClient:
             print(f"\r[!] WARNING: message from {sender} failed "
                   f"authentication (tampered or wrong key) -- discarded.\n> ",
                   end="", flush=True)
+            self._emit("message_rejected", sender=sender, reason="decryption_failed",
+                       detail="AES-GCM authentication failed (tampered or wrong key)")
             return
 
         # ... then extract {message, timestamp, signature} and verify the
@@ -607,11 +656,15 @@ class SecureChatClient:
         except (json.JSONDecodeError, KeyError, ValueError, UnicodeDecodeError):
             print(f"\r[!] WARNING: message from {sender} was malformed after "
                   f"decryption -- discarded.\n> ", end="", flush=True)
+            self._emit("message_rejected", sender=sender, reason="malformed",
+                       detail="payload was malformed after decryption")
             return
 
         if self.peer_public_key is None:
             print(f"\r[!] WARNING: cannot verify signature from {sender} -- "
                   f"their public key is unknown -- discarded.\n> ", end="", flush=True)
+            self._emit("message_rejected", sender=sender, reason="unknown_peer_key",
+                       detail="sender's public key is unknown")
             return
 
         signable = chat_signable_bytes(message_text, timestamp)
@@ -619,6 +672,8 @@ class SecureChatClient:
             print(f"\r[!] WARNING: signature verification FAILED for message "
                   f"from {sender} -- possible tampering or forgery -- "
                   f"discarded.\n> ", end="", flush=True)
+            self._emit("message_rejected", sender=sender, reason="signature_failed",
+                       detail="RSA signature verification failed (tampering or forgery)")
             return
 
         # Phase 7b, check 1: freshness window. A captured, validly-signed,
@@ -630,6 +685,8 @@ class SecureChatClient:
             print(f"\r[!] WARNING: message from {sender} has a stale or "
                   f"future timestamp ({timestamp}) -- rejected as too old / "
                   f"a possible replay -- discarded.\n> ", end="", flush=True)
+            self._emit("message_rejected", sender=sender, reason="stale_timestamp",
+                       detail=f"timestamp {timestamp} outside the freshness window")
             return
 
         # Phase 7b, check 2: exact-repeat detection (belt-and-suspenders).
@@ -661,9 +718,12 @@ class SecureChatClient:
             print(f"\r[!] WARNING: duplicate message detected from {sender} "
                   f"(same nonce seen before) -- rejected as a replay -- "
                   f"discarded.\n> ", end="", flush=True)
+            self._emit("message_rejected", sender=sender, reason="replay_duplicate",
+                       detail="exact same (sender, nonce) already seen -- replay")
             return
 
         print(f"\r{sender}: {message_text}\n> ", end="", flush=True)
+        self._emit("message_received", sender=sender, message=message_text, timestamp=timestamp)
 
     # --- receive loop ------------------------------------------------------
 
@@ -681,6 +741,10 @@ class SecureChatClient:
                     except json.JSONDecodeError:
                         continue
 
+                    # Wire-log hook: every envelope this client reads off
+                    # the wire, raw, before any of it is interpreted below.
+                    self._emit("envelope_received", envelope=envelope)
+
                     etype = envelope.get("type")
                     if etype in ("register_result", "login_result"):
                         self.auth_results.put(envelope)
@@ -695,6 +759,7 @@ class SecureChatClient:
                             self._replay_deferred_handshake()
                     elif etype == "system":
                         print(f"\r{envelope.get('text', '')}\n> ", end="", flush=True)
+                        self._emit("system_message", text=envelope.get("text", ""))
                     elif etype == "roster":
                         if self.peer in envelope.get("users", []) and self.username < self.peer:
                             self._initiate_handshake_when_ready()
@@ -712,6 +777,7 @@ class SecureChatClient:
         finally:
             if not self.stop_event.is_set():
                 print("\r[!] Disconnected from server.", flush=True)
+                self._emit("disconnected", reason="connection lost")
             self.stop_event.set()
             # Unblock anyone still waiting on an auth or pubkey result.
             self.auth_results.put(None)

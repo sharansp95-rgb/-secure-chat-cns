@@ -16,7 +16,8 @@ Work in progress.
 - **Phase 5 — RSA-2048 digital signatures for non-repudiation:** done
 - **Phase 6 — TLS transport encryption:** done
 - **Phase 7 — signed handshake (MITM fix), replay protection, live demo scripts:** done
-- Phase 8+ (final report, final demo prep): not started
+- **GUI chat client (Tkinter), with a live "wire log" panel:** done
+- Final report, final demo prep: not started
 
 ## How to run
 
@@ -333,3 +334,48 @@ See [`demo/README.md`](demo/README.md) for more detail, and
 Wireshark capture of a normal session (not included in this repo, since Wireshark
 wasn't available in the sandbox this project was built in — see that file for why and
 how to produce one yourself).
+
+## GUI chat client
+
+`gui/chat_gui.py` is a Tkinter GUI over the exact same client logic the terminal
+client uses — `client/client.py`'s `SecureChatClient`, `connect_tls`, and the
+signature/keystore helpers are imported and reused directly; the GUI contains no
+protocol, crypto, or networking logic of its own. Besides a normal-looking chat
+window, it has a second **"Wire Log"** panel that shows a live, timestamped feed of
+exactly what's crossing the network — handshake public keys and signatures,
+each message's nonce/ciphertext/tag (truncated for readability), and any
+rejected/tampered message in red — making the cryptography the rest of this project
+implements visible instead of invisible. Passwords are redacted in the wire log with
+a note that TLS (not the GUI) is what actually protects them in transit; chat
+plaintext never appears there at all, only its ciphertext.
+
+```
+python certs/generate_certs.py   # once, if you haven't already
+python server/server.py          # one terminal
+python gui/chat_gui.py           # one more terminal, for each user in the demo
+python gui/chat_gui.py
+```
+
+Fill in host/port (defaults to `127.0.0.1:5000`), a username, the peer's username,
+and a password, then click **Register** the first time for each username (**Login**
+afterward). Once both sides are connected, the peer's key fingerprint appears
+prominently at the top of the chat window — read it aloud to compare with what your
+peer sees, the same "check key fingerprints" mitigation as the terminal client
+(Phase 7a).
+
+**On the refactor this required:** `SecureChatClient`'s logic methods (register/
+login, handshake, send/receive) were already separate from the terminal-only
+presentation code (`authenticate()`/`main()`, which use `input()`/`print()`) — the
+GUI calls `SecureChatClient` directly rather than those two functions, so no
+duplication of the protocol was needed there. What *was* mixed into
+`SecureChatClient` itself was `print()` calls inside its own logic methods
+(handshake progress, warnings, incoming messages). Rather than remove those (risking
+a subtle change to the terminal client's exact behavior), an optional structured
+`event_callback` was added to `SecureChatClient.__init__`: every one of those
+`print()` sites now also emits a `(kind, data)` event through it, if one was
+supplied. The terminal client passes none, so it's unaffected — confirmed by running
+it end to end after the change and by the full `pytest tests/ -v` suite (74 tests)
+passing unchanged. The GUI passes a callback that only ever does
+`queue.Queue.put(...)` (thread-safe), and drains that queue on a `root.after()`
+timer to do all actual widget updates on Tkinter's main thread — SecureChatClient's
+background `receive_loop` thread never touches a widget directly.
