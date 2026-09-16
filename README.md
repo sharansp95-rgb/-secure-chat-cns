@@ -12,6 +12,9 @@ all seven properties backed by 74 automated tests and three live attack-and-defe
 demo scripts, plus a Tkinter GUI whose "Wire Log" panel makes the cryptography visible
 during a demo instead of invisible.
 
+PDF copies of this documentation are available in [`docs/pdf/`](docs/pdf/) for offline
+viewing or printing.
+
 ## Quick start (clean clone → working two-GUI demo)
 
 ```
@@ -35,9 +38,13 @@ who's never run it before should do, live in front of the professor), see
 ## Architecture
 
 Two clients, one relay server, TLS wrapping every connection, and an inner
-end-to-end layer (ECDH + AES-GCM + RSA) the server itself cannot see into — see
-[`docs/architecture.md`](docs/architecture.md) for the full diagram and a breakdown of
-exactly what the server can and cannot see at each point.
+end-to-end layer (ECDH + AES-GCM + RSA) the server itself cannot see into:
+
+![Architecture diagram](docs/architecture_diagram.png)
+
+See [`docs/architecture.md`](docs/architecture.md) for the full-resolution diagram,
+the Mermaid source, and a breakdown of exactly what the server can and cannot see at
+each point.
 
 ## Security properties
 

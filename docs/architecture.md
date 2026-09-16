@@ -11,6 +11,14 @@ never reach it. The diagram below shows both boundaries at once: the outer TLS t
 (what protects the pipe) and the inner end-to-end layer (what protects the content,
 even from the server itself).
 
+![Architecture diagram: Client A and Client B each run SecureChatClient with local RSA and per-session ECDH keys, connected to server/server.py's relay over two separately TLS-pinned tunnels; the relay's envelope router and user store (dark green) only ever see routing metadata, password hashes, and RSA public keys, while a direct dotted line shows the end-to-end signed-ECDH-handshake-then-AES-GCM-and-RSA-PSS layer running between the two clients, invisible to the server.](architecture_diagram.png)
+
+A high-resolution version is also at [`architecture_diagram.png`](architecture_diagram.png)
+(2352px wide) and as a zoomable vector at [`architecture_diagram.svg`](architecture_diagram.svg).
+
+<details>
+<summary>Mermaid source (for future edits — re-render with `npx @mermaid-js/mermaid-cli`)</summary>
+
 ```mermaid
 flowchart LR
     subgraph ClientA["Client A (client.py / chat_gui.py)"]
@@ -44,6 +52,8 @@ flowchart LR
     classDef cannotSee fill:#3d1a1a,color:#e8e8e8,stroke:#6b2f2f;
     class S_Route,S_Store canSee;
 ```
+
+</details>
 
 ## What the server CAN see
 
