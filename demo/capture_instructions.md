@@ -1,11 +1,11 @@
 # Wireshark capture instructions
 
-**Note on this artifact:** Wireshark/`tshark` is not available in the sandboxed
-environment this project was developed in, so no `capture_normal_session.pcapng` file
-is included in this repo. Rather than fake one, this file gives exact,
-copy-pasteable steps for you to produce a real capture on your own machine (which
-you'll want for the Review 2 demo/report anyway, since a real capture is stronger
-evidence than anything generated inside a sandbox).
+**Note on this artifact:** `demo/capture_normal_session.pcapng` (committed alongside
+this file) is a real capture recorded on a teammate's own machine, since
+Wireshark/`tshark` wasn't available in the sandboxed environment this project was
+originally *built* in. This file gives the exact, copy-pasteable steps used to produce
+it, so you can reproduce it yourself (e.g. a longer or different capture for the
+report) rather than relying only on the one already committed here.
 
 ## What you're capturing
 

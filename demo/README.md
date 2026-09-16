@@ -1,7 +1,9 @@
 # Demo artifacts (Review 2 / final report evidence)
 
 This folder holds the evidence artifacts for the security properties this project
-claims, and the scripts used to reproduce them live.
+claims, and the scripts used to reproduce them live. For the full click-by-click live
+demo script (what to click, what should appear, what to say), see
+[`full_walkthrough.md`](full_walkthrough.md).
 
 ## Live demo scripts
 
@@ -25,11 +27,13 @@ python demo/run_mitm_handshake_demo.py
 
 ## Wireshark capture
 
-`tshark`/Wireshark is not available in the sandboxed environment this project was
-developed in, so no `capture_normal_session.pcapng` is committed here. See
-[`capture_instructions.md`](capture_instructions.md) for exact, copy-pasteable steps to
-produce a real capture on your own machine — this is called out explicitly rather than
-faking a capture file.
+`capture_normal_session.pcapng` (committed in this folder) is a real capture of a
+normal session — registration, login, handshake, and a few chat messages — recorded on
+a teammate's own machine following [`capture_instructions.md`](capture_instructions.md).
+`tshark`/Wireshark wasn't available in the sandboxed environment this project was
+originally *built* in, so that file documents the exact filter and steps to produce
+your own capture too, e.g. a longer one, rather than relying only on the one committed
+here.
 
 ## Reproducing everything from scratch
 
