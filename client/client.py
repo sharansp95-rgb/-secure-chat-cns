@@ -41,8 +41,36 @@ verified against the sender's public key (fetched once via "get_pubkey" and
 cached for the session); a message that fails verification is warned about
 and discarded, never displayed.
 
+Phase 7a signs the ECDH handshake itself: Phase 3's handshake_init/
+handshake_response envelopes carried a raw, *unsigned* ECDH public key. A
+malicious or compromised relay server -- note this is a different threat
+than a network eavesdropper, and TLS (Phase 6) does not defend against it,
+since the server is the trusted TLS endpoint -- could substitute its own
+ECDH public key for either peer's, completing two separate handshakes
+(attacker<->A, attacker<->B) while both clients believe they're talking
+directly to each other. Since each client already has a long-term RSA
+identity (Phase 5), the fix is to sign the ECDH public key bytes with the
+sender's RSA private key before sending, and have the receiver verify that
+signature against the sender's already-fetched RSA public key *before*
+computing the shared secret -- a failed verification aborts the handshake
+entirely, deriving no session key. After a successful handshake, both sides
+also print a short human-readable fingerprint of the peer's RSA public key,
+so two people can read it aloud to each other (voice call, in person) and
+catch a MITM even if every automated check were somehow fooled -- the
+"check key fingerprints" mitigation.
+
+Phase 7b adds replay protection to chat messages: previously a captured,
+valid (ciphertext, tag, signature) could be resent verbatim later and would
+still pass AES-GCM and signature verification, since neither checks
+freshness. A Unix timestamp is now included in what gets signed (so it can't
+be altered without detection) and checked on receipt against a freshness
+window; the AES-GCM nonce (already unique per message by construction) is
+additionally tracked per-sender in memory for the same window, rejecting an
+exact repeat even if it somehow fell within the timestamp bounds.
+
 Wire format: one JSON object per line, matching server/server.py. Binary
-fields (public keys, nonce, ciphertext, tag) are base64-encoded for JSON.
+fields (public keys, nonce, ciphertext, tag, signatures) are base64-encoded
+for JSON.
 """
 
 import argparse
@@ -55,6 +83,7 @@ import socket
 import ssl
 import sys
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -62,12 +91,47 @@ from auth.keystore import load_private_key, save_private_key  # noqa: E402
 from crypto_engine.aes_gcm import DecryptionError, decrypt, encrypt  # noqa: E402
 from crypto_engine.dh_exchange import compute_shared_key  # noqa: E402
 from crypto_engine.dh_exchange import generate_keypair as generate_ecdh_keypair  # noqa: E402
-from crypto_engine.signatures import deserialize_public_key  # noqa: E402
+from crypto_engine.signatures import deserialize_public_key, fingerprint  # noqa: E402
 from crypto_engine.signatures import generate_keypair as generate_rsa_keypair  # noqa: E402
 from crypto_engine.signatures import serialize_public_key, sign, verify  # noqa: E402
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5000
+
+# Phase 7b replay-protection tuning. A message older than REPLAY_WINDOW_SECONDS
+# is rejected as stale/possibly replayed; one more than CLOCK_SKEW_SECONDS in
+# the future is rejected too (allows for small, honest clock differences
+# between machines without opening a large future-dated replay window).
+REPLAY_WINDOW_SECONDS = 30
+CLOCK_SKEW_SECONDS = 5
+# How long a (sender, nonce) pair is remembered for exact-repeat detection --
+# a little longer than the freshness window is enough, since anything older
+# than REPLAY_WINDOW_SECONDS is already rejected by the timestamp check alone.
+_NONCE_MEMORY_SECONDS = REPLAY_WINDOW_SECONDS + CLOCK_SKEW_SECONDS
+
+
+def chat_signable_bytes(message: str, timestamp: int) -> bytes:
+    """Canonical bytes signed for a chat message: the message text and its
+    timestamp together, so the timestamp can't be stripped or altered by a
+    relay/attacker without invalidating the signature. Both the sender
+    (signing) and receiver (verifying) must build this identically."""
+    return json.dumps(
+        {"message": message, "timestamp": timestamp}, sort_keys=True
+    ).encode("utf-8")
+
+
+def is_timestamp_fresh(timestamp, now=None,
+                        window=REPLAY_WINDOW_SECONDS, skew=CLOCK_SKEW_SECONDS):
+    """True if `timestamp` (Unix epoch seconds) is neither older than
+    `window` seconds nor more than `skew` seconds in the future, relative to
+    `now` (defaults to the current time)."""
+    if now is None:
+        now = time.time()
+    try:
+        timestamp = float(timestamp)
+    except (TypeError, ValueError):
+        return False
+    return (now - window) <= timestamp <= (now + skew)
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CAFILE = os.path.join(_PROJECT_ROOT, "certs", "server.crt")
@@ -175,12 +239,32 @@ class SecureChatClient:
 
         # Phase 5: this identity's long-term RSA signing key (loaded/generated
         # during authenticate()), and the peer's cached public key used to
-        # verify their signatures. peer_public_key is fetched once via
-        # get_pubkey before the chat loop starts (see fetch_peer_public_key);
-        # it is never re-fetched lazily from inside receive_loop, since that
-        # would deadlock the very queue it would be waiting on.
+        # verify their signatures. main() fetches this once, synchronously,
+        # right after authentication succeeds -- but a Phase 7a signed
+        # handshake can legitimately start *before* that finishes (e.g. the
+        # peer was already online and roster/user_joined fires the moment
+        # receive_loop starts, well before the main thread gets around to
+        # its own explicit fetch). Rather than race that and fail spuriously,
+        # _handle_handshake_init/_response DEFER (not abort) when
+        # peer_public_key isn't cached yet: see _defer_or_request_pubkey and
+        # _replay_deferred_handshake below. A handshake only ever ABORTS when
+        # a signature was actually checked and failed -- never merely because
+        # the key hadn't arrived yet.
         self.rsa_private_key = None
         self.peer_public_key = None
+        self.peer_public_key_pem = None  # raw PEM string, for fingerprinting
+
+        # Phase 7a race-avoidance: envelopes that arrived before we had the
+        # peer's public key cached, held here until it arrives (or we learn
+        # it never will), plus whether *we* should initiate once it's ready.
+        self._pubkey_requested = False
+        self._deferred_handshake_envelopes = []  # list of ("init"|"response", envelope)
+        self._initiate_when_key_ready = False
+
+        # Phase 7b replay protection: (sender, nonce_b64) -> time.time() when
+        # first seen, for exact-repeat detection within _NONCE_MEMORY_SECONDS.
+        # Guarded by _lock along with everything else above.
+        self._seen_nonces = {}
 
     def send_envelope(self, envelope):
         try:
@@ -202,27 +286,120 @@ class SecureChatClient:
     def fetch_peer_public_key(self, timeout=10):
         """Request the peer's RSA public key from the server and cache it.
 
-        Must be called from the main thread (not from within receive_loop):
-        it blocks on pubkey_results, which is only filled by the receiver
-        thread reading further lines -- calling this from inside that same
-        thread would deadlock.
+        BLOCKING -- must be called from the main thread (not from within
+        receive_loop): it waits on pubkey_results, which is only filled by
+        the receiver thread reading further lines, so calling this from
+        inside that same thread would deadlock. main() uses this once, right
+        after authentication, as the common-case fetch. For the race where a
+        handshake message arrives before this has completed, see
+        _defer_or_request_pubkey (non-blocking, safe to call from
+        receive_loop) instead.
         """
         self.send_envelope({"type": "get_pubkey", "username": self.peer})
         try:
             result = self.pubkey_results.get(timeout=timeout)
         except queue.Empty:
             return False
-        if result is None or not result.get("success") or not result.get("public_key"):
+        return self._cache_peer_public_key(result)
+
+    def _cache_peer_public_key(self, result):
+        """Store a pubkey_result envelope's key into peer_public_key(_pem) if
+        it's valid and for our peer. Returns True on success. Shared by the
+        blocking fetch_peer_public_key() and the non-blocking receive_loop path."""
+        if (
+            not result
+            or result.get("username") != self.peer
+            or not result.get("success")
+            or not result.get("public_key")
+        ):
             return False
         try:
-            self.peer_public_key = deserialize_public_key(
-                result["public_key"].encode("utf-8")
-            )
+            self.peer_public_key = deserialize_public_key(result["public_key"].encode("utf-8"))
         except ValueError:
             return False
+        # Cache the exact PEM text too (not just the parsed key object) so
+        # the fingerprint we print matches byte-for-byte what the peer would
+        # compute over their own public key PEM.
+        self.peer_public_key_pem = result["public_key"]
         return True
 
+    def _defer_or_request_pubkey(self, kind, envelope):
+        """Called from receive_loop when a handshake_init/handshake_response
+        arrives but we don't have the peer's public key cached yet. Holds
+        the envelope to replay once the key arrives (see
+        _replay_deferred_handshake), and -- non-blocking, so safe here --
+        (re)sends a get_pubkey request if we haven't already got one in
+        flight. This is a defer, not a failure: the handshake still has not
+        been verified, so no session key exists yet, but we haven't given up
+        on it either."""
+        with self._lock:
+            self._deferred_handshake_envelopes.append((kind, envelope))
+            already_requested = self._pubkey_requested
+            self._pubkey_requested = True
+        if not already_requested:
+            self.send_envelope({"type": "get_pubkey", "username": self.peer})
+        print(f"\r[*] Waiting on {self.peer}'s public key to verify an incoming "
+              f"handshake message...\n> ", end="", flush=True)
+
+    def _replay_deferred_handshake(self):
+        """Called from receive_loop right after peer_public_key is (or
+        definitively cannot be) cached: replays any handshake_init/response
+        that arrived too early, and starts our own handshake if we were
+        waiting to be the initiator."""
+        with self._lock:
+            deferred = self._deferred_handshake_envelopes
+            self._deferred_handshake_envelopes = []
+            want_initiate = self._initiate_when_key_ready
+            self._initiate_when_key_ready = False
+
+        if self.peer_public_key is None:
+            if deferred or want_initiate:
+                self._abort_handshake(
+                    f"{self.peer}'s public key could not be retrieved from the "
+                    f"server -- they may not be registered."
+                )
+            return
+
+        for kind, envelope in deferred:
+            if kind == "init":
+                self._handle_handshake_init(envelope)
+            elif kind == "response":
+                self._handle_handshake_response(envelope)
+        if want_initiate and self.session_key is None:
+            self.initiate_handshake()
+
     # --- handshake -----------------------------------------------------
+
+    def _sign_ecdh_pubkey(self, ecdh_public_bytes):
+        """Sign our own ECDH public key bytes with our RSA private key, for
+        the peer to verify before trusting this handshake message (Phase 7a).
+        Returns b"" (an empty signature, which verify() always rejects) if we
+        have no local signing key -- sent rather than crashing, matching the
+        same fallback used for chat messages."""
+        if self.rsa_private_key is None:
+            return b""
+        return sign(self.rsa_private_key, ecdh_public_bytes)
+
+    def _initiate_handshake_when_ready(self):
+        """Called from receive_loop when roster/user_joined says our peer is
+        online and we're the designated initiator. If we already have their
+        public key cached, start the handshake immediately (the common
+        case); otherwise request it (non-blocking) and let
+        _replay_deferred_handshake start the handshake once it arrives --
+        this is what avoids the race of initiating before we could even
+        verify a *reply* to our own handshake_init."""
+        with self._lock:
+            if self._handshake_started or self.session_key is not None:
+                return
+            have_key = self.peer_public_key is not None
+            if not have_key:
+                self._initiate_when_key_ready = True
+                already_requested = self._pubkey_requested
+                self._pubkey_requested = True
+        if have_key:
+            self.initiate_handshake()
+        elif not already_requested:
+            self.send_envelope({"type": "get_pubkey", "username": self.peer})
 
     def initiate_handshake(self):
         with self._lock:
@@ -238,10 +415,40 @@ class SecureChatClient:
             "from": self.username,
             "to": self.peer,
             "pubkey": b64(public_bytes),
+            # Phase 7a: sign our ECDH public key with our RSA identity key so
+            # the peer can confirm it really came from us, not a relay/MITM
+            # substituting its own key.
+            "handshake_sig": b64(self._sign_ecdh_pubkey(public_bytes)),
         })
 
+    def _abort_handshake(self, reason):
+        with self._lock:
+            self._handshake_started = False
+            self._pending_private_key = None
+        print(f"\r[!] HANDSHAKE ABORTED with {self.peer}: {reason} No session key "
+              f"was derived -- this connection is NOT secure. Possible MITM; do not "
+              f"trust any messages claiming to be from {self.peer} right now.\n> ",
+              end="", flush=True)
+
     def _handle_handshake_init(self, envelope):
+        if self.peer_public_key is None:
+            # Not a failure yet -- we just don't have the verification key
+            # in hand this instant. Defer and ask for it; see
+            # _defer_or_request_pubkey / _replay_deferred_handshake. We still
+            # derive no session key until a signature actually verifies.
+            self._defer_or_request_pubkey("init", envelope)
+            return
+
         peer_pub = unb64(envelope["pubkey"])
+        handshake_sig = unb64(envelope.get("handshake_sig", ""))
+        if not verify(self.peer_public_key, peer_pub, handshake_sig):
+            self._abort_handshake(
+                f"the ECDH public key claimed to be from {self.peer} did NOT "
+                f"verify against their RSA public key -- it may have been "
+                f"substituted by the relay server or an attacker."
+            )
+            return
+
         private_key, public_bytes = generate_ecdh_keypair()
         session_key = compute_shared_key(private_key, peer_pub)
         # Private key and raw shared secret are never retained past this
@@ -253,16 +460,40 @@ class SecureChatClient:
             "from": self.username,
             "to": self.peer,
             "pubkey": b64(public_bytes),
+            "handshake_sig": b64(self._sign_ecdh_pubkey(public_bytes)),
         })
         self._finish_handshake(session_key)
 
     def _handle_handshake_response(self, envelope):
-        peer_pub = unb64(envelope["pubkey"])
+        with self._lock:
+            have_pending = self._pending_private_key is not None
+        if not have_pending:
+            return  # response we didn't ask for; ignore
+
+        if self.peer_public_key is None:
+            # Leave _pending_private_key in place -- we'll re-enter this
+            # same method (with the same envelope) via
+            # _replay_deferred_handshake once the key arrives.
+            self._defer_or_request_pubkey("response", envelope)
+            return
+
         with self._lock:
             private_key = self._pending_private_key
             self._pending_private_key = None
         if private_key is None:
-            return  # response we didn't ask for; ignore
+            return  # consumed by a concurrent call already; nothing to do
+
+        peer_pub = unb64(envelope["pubkey"])
+        handshake_sig = unb64(envelope.get("handshake_sig", ""))
+        if not verify(self.peer_public_key, peer_pub, handshake_sig):
+            self._abort_handshake(
+                f"the ECDH public key claimed to be from {self.peer} did NOT "
+                f"verify against their RSA public key -- it may have been "
+                f"substituted by the relay server or an attacker."
+            )
+            del private_key
+            return
+
         session_key = compute_shared_key(private_key, peer_pub)
         del private_key
         self._finish_handshake(session_key)
@@ -273,7 +504,20 @@ class SecureChatClient:
             queued = self._outgoing_queue
             self._outgoing_queue = []
         print(f"\r[*] Secure session established with {self.peer} "
-              f"(AES-256-GCM key derived via ECDH).\n> ", end="", flush=True)
+              f"(AES-256-GCM key derived via ECDH, authenticated by RSA signature).",
+              end="", flush=True)
+        # Phase 7a "check key fingerprints" mitigation: print a short,
+        # human-readable fingerprint of the peer's RSA public key. Two people
+        # can read this aloud to each other (voice call, in person) to
+        # independently confirm they hold the same identity for their peer,
+        # catching a MITM even if every automated check were somehow fooled.
+        if self.peer_public_key_pem:
+            fp = fingerprint(self.peer_public_key_pem)
+            print(f"\n[*] {self.peer}'s key fingerprint: {fp}\n"
+                  f"    Verify this out-of-band (voice/in person) with {self.peer} "
+                  f"to rule out a man-in-the-middle.\n> ", end="", flush=True)
+        else:
+            print("\n> ", end="", flush=True)
         for text in queued:
             self._encrypt_and_send(text)
 
@@ -283,13 +527,17 @@ class SecureChatClient:
         with self._lock:
             key = self.session_key
 
-        # Sign THEN encrypt: the plaintext is signed with our own long-term
-        # RSA private key first, and the {message, signature} pair is what
-        # actually gets AES-GCM encrypted -- so the signature is protected
-        # in transit just like the message text, never sent in the clear.
-        message_bytes = text.encode("utf-8")
+        # Sign THEN encrypt: the plaintext (Phase 7b: plus a timestamp) is
+        # signed with our own long-term RSA private key first, and the
+        # {message, timestamp, signature} triple is what actually gets
+        # AES-GCM encrypted -- so both the message and its timestamp travel
+        # protected inside the same ciphertext, never sent in the clear, and
+        # the timestamp can't be stripped or altered without invalidating
+        # the signature.
+        timestamp = int(time.time())
+        signable = chat_signable_bytes(text, timestamp)
         if self.rsa_private_key is not None:
-            signature = sign(self.rsa_private_key, message_bytes)
+            signature = sign(self.rsa_private_key, signable)
         else:
             # No local signing key (e.g. this client never registered/loaded
             # one) -- send unsigned rather than crash. The receiver will
@@ -298,6 +546,7 @@ class SecureChatClient:
             signature = b""
         inner_payload = json.dumps({
             "message": text,
+            "timestamp": timestamp,
             "signature": b64(signature),
         }).encode("utf-8")
 
@@ -345,13 +594,15 @@ class SecureChatClient:
                   end="", flush=True)
             return
 
-        # ... then extract {message, signature} and verify the signature
-        # against the sender's cached RSA public key. A message that fails
-        # verification -- tampered, forged, or from an unverifiable identity
-        # -- is warned about and discarded, never displayed.
+        # ... then extract {message, timestamp, signature} and verify the
+        # signature (now covering the timestamp too, Phase 7b) against the
+        # sender's cached RSA public key. A message that fails verification
+        # -- tampered, forged, or from an unverifiable identity -- is warned
+        # about and discarded, never displayed.
         try:
             inner = json.loads(plaintext.decode("utf-8"))
             message_text = inner["message"]
+            timestamp = inner["timestamp"]
             signature = unb64(inner["signature"])
         except (json.JSONDecodeError, KeyError, ValueError, UnicodeDecodeError):
             print(f"\r[!] WARNING: message from {sender} was malformed after "
@@ -363,9 +614,52 @@ class SecureChatClient:
                   f"their public key is unknown -- discarded.\n> ", end="", flush=True)
             return
 
-        if not verify(self.peer_public_key, message_text.encode("utf-8"), signature):
+        signable = chat_signable_bytes(message_text, timestamp)
+        if not verify(self.peer_public_key, signable, signature):
             print(f"\r[!] WARNING: signature verification FAILED for message "
                   f"from {sender} -- possible tampering or forgery -- "
+                  f"discarded.\n> ", end="", flush=True)
+            return
+
+        # Phase 7b, check 1: freshness window. A captured, validly-signed,
+        # validly-encrypted message resent later (or a legitimate message
+        # that's simply too old) is rejected here -- the signature alone
+        # can't catch this, since it says nothing about *when* the message
+        # is being presented, only that its content+timestamp are authentic.
+        if not is_timestamp_fresh(timestamp):
+            print(f"\r[!] WARNING: message from {sender} has a stale or "
+                  f"future timestamp ({timestamp}) -- rejected as too old / "
+                  f"a possible replay -- discarded.\n> ", end="", flush=True)
+            return
+
+        # Phase 7b, check 2: exact-repeat detection (belt-and-suspenders).
+        # Even a message that somehow lands inside the freshness window is
+        # rejected if we've already seen this exact (sender, nonce) pair --
+        # AES-GCM nonces are fresh random values per encrypt() call, so a
+        # genuine resend from the sender would carry a *new* nonce; seeing
+        # the same nonce twice means the same envelope was replayed verbatim.
+        nonce_b64 = envelope.get("nonce", "")
+        now = time.time()
+        with self._lock:
+            # Prune anything old enough that it could no longer pass the
+            # freshness check anyway, to bound memory over a long session.
+            stale_keys = [
+                k for k, seen_at in self._seen_nonces.items()
+                if now - seen_at > _NONCE_MEMORY_SECONDS
+            ]
+            for k in stale_keys:
+                del self._seen_nonces[k]
+
+            dedup_key = (sender, nonce_b64)
+            if dedup_key in self._seen_nonces:
+                already_seen = True
+            else:
+                already_seen = False
+                self._seen_nonces[dedup_key] = now
+
+        if already_seen:
+            print(f"\r[!] WARNING: duplicate message detected from {sender} "
+                  f"(same nonce seen before) -- rejected as a replay -- "
                   f"discarded.\n> ", end="", flush=True)
             return
 
@@ -391,15 +685,22 @@ class SecureChatClient:
                     if etype in ("register_result", "login_result"):
                         self.auth_results.put(envelope)
                     elif etype == "pubkey_result":
+                        # Always route to anyone blocked in fetch_peer_public_key()...
                         self.pubkey_results.put(envelope)
+                        # ...and also opportunistically cache + replay any
+                        # handshake messages that arrived before we had this
+                        # key (non-blocking -- safe to do from this thread).
+                        if envelope.get("username") == self.peer:
+                            self._cache_peer_public_key(envelope)
+                            self._replay_deferred_handshake()
                     elif etype == "system":
                         print(f"\r{envelope.get('text', '')}\n> ", end="", flush=True)
                     elif etype == "roster":
                         if self.peer in envelope.get("users", []) and self.username < self.peer:
-                            self.initiate_handshake()
+                            self._initiate_handshake_when_ready()
                     elif etype == "user_joined":
                         if envelope.get("username") == self.peer and self.username < self.peer:
-                            self.initiate_handshake()
+                            self._initiate_handshake_when_ready()
                     elif etype == "handshake_init" and envelope.get("from") == self.peer:
                         self._handle_handshake_init(envelope)
                     elif etype == "handshake_response" and envelope.get("from") == self.peer:
@@ -415,6 +716,16 @@ class SecureChatClient:
             # Unblock anyone still waiting on an auth or pubkey result.
             self.auth_results.put(None)
             self.pubkey_results.put(None)
+
+
+def print_own_fingerprint(rsa_private_key):
+    """Print this identity's own RSA key fingerprint, the same way the
+    peer's is printed after a handshake -- so a user can read theirs aloud
+    when the other person asks "what's your fingerprint?"."""
+    if rsa_private_key is None:
+        return
+    own_pem = serialize_public_key(rsa_private_key.public_key())
+    print(f"[*] Your key fingerprint: {fingerprint(own_pem)}")
 
 
 def authenticate(client):
@@ -467,6 +778,7 @@ def authenticate(client):
                           f"machine -- outgoing messages will be sent unsigned, and "
                           f"the recipient's client will reject them. Register from "
                           f"this machine, or copy your private key here, to fix this.")
+            print_own_fingerprint(client.rsa_private_key)
             return True
         print(f"[!] {result.get('reason', 'Authentication failed.')} Please try again.")
     return False
@@ -522,6 +834,7 @@ def main():
                 client.rsa_private_key = rsa_private_key
             else:
                 client.rsa_private_key = load_private_key(args.username)
+            print_own_fingerprint(client.rsa_private_key)
     else:
         authenticated = authenticate(client)
 

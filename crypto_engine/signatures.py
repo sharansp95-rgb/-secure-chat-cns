@@ -22,6 +22,8 @@ Hash: SHA-256, matching the aes_gcm/dh_exchange modules elsewhere in this
 project.
 """
 
+import hashlib
+
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -35,6 +37,7 @@ __all__ = [
     "deserialize_private_key",
     "serialize_public_key",
     "deserialize_public_key",
+    "fingerprint",
 ]
 
 KEY_SIZE = 2048
@@ -126,3 +129,27 @@ def serialize_public_key(public_key) -> bytes:
 
 def deserialize_public_key(pem_bytes: bytes):
     return serialization.load_pem_public_key(pem_bytes)
+
+
+# --- fingerprint (Phase 7: human-verifiable MITM check) --------------------
+
+def fingerprint(public_key_pem: bytes, length: int = 16) -> str:
+    """Return a short, human-readable fingerprint of an RSA public key: the
+    first `length` hex characters of SHA-256(PEM bytes), grouped in 4-char
+    blocks (e.g. "A1B2 C3D4 E5F6 A7B8").
+
+    This is what two humans read out to each other (e.g. over a voice call)
+    to independently confirm they hold the same public key for a given
+    identity -- a check that doesn't depend on trusting the relay server or
+    the software's own automated verification, which is exactly the point:
+    it catches a MITM even if it somehow fooled every automated check.
+
+    Both sides must fingerprint the *same* canonical bytes to get matching
+    results, so callers should always pass the exact PEM bytes as received
+    (e.g. from a get_pubkey response), not a re-serialization that might
+    differ in whitespace/line-ending details.
+    """
+    if isinstance(public_key_pem, str):
+        public_key_pem = public_key_pem.encode("utf-8")
+    digest = hashlib.sha256(public_key_pem).hexdigest().upper()[:length]
+    return " ".join(digest[i:i + 4] for i in range(0, len(digest), 4))

@@ -4,6 +4,9 @@ __pycache__/
 venv/
 *.pcap
 *.pcapng
+# ...except demo capture evidence, which is meant to be committed (see demo/README.md).
+!demo/*.pcap
+!demo/*.pcapng
 .env
 
 # Local user store: holds real hashed credentials from testing, never

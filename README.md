@@ -15,7 +15,8 @@ Work in progress.
 - **Phase 4 — login, identity, and PBKDF2 password hashing:** done
 - **Phase 5 — RSA-2048 digital signatures for non-repudiation:** done
 - **Phase 6 — TLS transport encryption:** done
-- Phase 7+ (Wireshark capture/tamper/replay tests, final report): not started
+- **Phase 7 — signed handshake (MITM fix), replay protection, live demo scripts:** done
+- Phase 8+ (final report, final demo prep): not started
 
 ## How to run
 
@@ -98,6 +99,49 @@ ever forwards opaque public-key bytes and encrypted (nonce/ciphertext/tag) envel
 it never computes, stores, or sees the shared secret, and a tampered or forged message
 is rejected with a warning instead of being decrypted into garbage.
 
+## How the signed handshake stops a relay-server MITM (Phase 7a)
+
+The handshake above has a gap: `handshake_init`/`handshake_response` carry a raw ECDH
+public key, and nothing about the handshake itself ties that key to a particular long-
+term identity. A malicious or **compromised relay server** — a different threat than a
+network eavesdropper; TLS (Phase 6) does not help here, since the server is the trusted
+TLS endpoint — could substitute its own ECDH public key for either peer's, completing
+two separate handshakes (attacker↔A, attacker↔B) while both clients believe they're
+talking directly to each other. Since each client already has a long-term RSA identity
+(Phase 5), the fix reuses it: the ECDH public key is signed with the sender's RSA
+private key before sending (`handshake_sig`), and the receiver verifies that signature
+against the sender's already-known RSA public key **before** computing the shared
+secret. If verification fails — or the ECDH key was swapped after signing, or the
+signature was produced by the wrong RSA key — the handshake **aborts with a clear
+error and no session key is ever derived**; nothing gets silently trusted. After a
+*successful* handshake, both clients also print a short human-readable **fingerprint**
+of the peer's RSA public key (`crypto_engine/signatures.fingerprint`, the first 16 hex
+characters of SHA-256 of the key's PEM bytes) — the "check key fingerprints"
+mitigation: two people can read this aloud to each other (voice call, in person) to
+independently confirm they hold the same identity for their peer, catching a MITM even
+if some future bug let a forged handshake slip past the automated check. See
+`demo/run_mitm_handshake_demo.py` for a live demonstration of a relay attempting this
+attack and being stopped.
+
+## How replay protection works (Phase 7b)
+
+A captured, validly-encrypted, validly-signed chat envelope could otherwise be resent
+later (or twice) and would still pass both AES-GCM and the RSA signature check, since
+neither says anything about *when* the message is being presented. Two independent
+defenses close this: first, a Unix timestamp is included in what gets **signed**
+(`chat_signable_bytes(message, timestamp)`) before encryption, so it travels tamper-
+evident — an attacker can't just bump the timestamp on a captured message to make it
+look fresh again, since that invalidates the signature. On receipt, a message is
+rejected if its timestamp is more than `REPLAY_WINDOW_SECONDS` (30s) old or more than
+`CLOCK_SKEW_SECONDS` (5s) in the future. Second, belt-and-suspenders: each client
+tracks recently-seen `(sender, nonce)` pairs in memory (nonces are already fresh random
+values per `aes_gcm.encrypt()` call, so a genuine resend from the sender would carry a
+*different* nonce) and rejects an exact repeat outright, even if it somehow fell inside
+the freshness window; old entries are pruned automatically once they're old enough that
+the timestamp check alone would catch them anyway. See `demo/run_replay_demo.py` for a
+live demonstration of a relay resending a captured message and the recipient's client
+rejecting the duplicate.
+
 ## How signing works (non-repudiation)
 
 The Phase 3 ECDH session key proves a message was encrypted for this pair of peers,
@@ -160,11 +204,11 @@ above. Every envelope has a `"type"` field:
 | `roster` | server → client | list of currently-online usernames |
 | `system` | server → client | human-readable join/leave/error text |
 | `user_joined` | server → client | `username` of a newly-connected peer |
-| `handshake_init` | client ↔ client (via server) | `from`, `to`, `pubkey` (base64, 32 raw bytes) |
-| `handshake_response` | client ↔ client (via server) | `from`, `to`, `pubkey` (base64, 32 raw bytes) |
+| `handshake_init` | client ↔ client (via server) | `from`, `to`, `pubkey` (base64, 32 raw bytes), `handshake_sig` (base64, RSA-PSS signature over `pubkey`) |
+| `handshake_response` | client ↔ client (via server) | `from`, `to`, `pubkey` (base64, 32 raw bytes), `handshake_sig` (base64, RSA-PSS signature over `pubkey`) |
 | `get_pubkey` | client → server | `username` (whose RSA public key to look up) |
 | `pubkey_result` | server → client | `username`, `public_key` (RSA PEM text or null), `success` |
-| `chat` | client ↔ client (via server) | `from`, `to`, `nonce`, `ciphertext`, `tag` (all base64); the plaintext AES-GCM decrypts to is itself `{"message", "signature"}` JSON |
+| `chat` | client ↔ client (via server) | `from`, `to`, `nonce`, `ciphertext`, `tag` (all base64); the plaintext AES-GCM decrypts to is itself `{"message", "timestamp", "signature"}` JSON, where `signature` covers `{message, timestamp}` together |
 
 A connection must complete a successful `register` or `login` exchange before the
 server admits it to the roster or accepts any handshake/chat envelope from it. The
@@ -236,6 +280,16 @@ assert verify(public_key, b"hello", signature) is True
 assert verify(public_key, b"tampered", signature) is False  # never raises
 ```
 
+`crypto_engine/signatures.fingerprint()` (Phase 7a) produces the short human-readable
+fingerprint printed after a handshake, for the "check key fingerprints" mitigation:
+
+```python
+from crypto_engine.signatures import fingerprint, generate_keypair, serialize_public_key
+
+_, public_key = generate_keypair()
+print(fingerprint(serialize_public_key(public_key)))  # e.g. "A1B2 C3D4 E5F6 A7B8"
+```
+
 `auth/keystore.py` saves each account's RSA private key locally as an unencrypted PEM
 file under `data/keys/<username>_private.pem` (gitignored). In a production system
 that file would itself be encrypted at rest (e.g. wrapped under a key derived from the
@@ -253,3 +307,29 @@ python certs/generate_certs.py --force   # regenerate, overwriting existing cert
 
 Both output files are gitignored — see "How to run" above for why, and for the
 one-time setup step every teammate needs to run.
+
+## Live demo scripts
+
+`demo/run_*.py` (Phase 7c) are standalone scripts that each start their own real mini
+relay server and two real clients to demonstrate one attack being stopped — meant to be
+run live for a demo or in front of the professor, not just as passing tests. Each
+prints a clear `[PASS]`/`[FAIL]` per check and an overall result:
+
+| Script | What it proves |
+|---|---|
+| `demo/run_tamper_demo.py` | A malicious/compromised relay flipping a ciphertext byte in transit cannot get a tampered message displayed — AES-GCM's tag (Phase 2/3) catches it. |
+| `demo/run_replay_demo.py` | A relay resending a captured chat message a second time cannot get it displayed twice — the Phase 7b timestamp + duplicate-nonce tracking rejects the replay. |
+| `demo/run_mitm_handshake_demo.py` | A malicious relay substituting its own ECDH public key during the handshake is stopped by the Phase 7a signed handshake — no session key is ever derived, and the fingerprint that would result doesn't match either. |
+
+```
+python certs/generate_certs.py   # once, if you haven't already
+python demo/run_tamper_demo.py
+python demo/run_replay_demo.py
+python demo/run_mitm_handshake_demo.py
+```
+
+See [`demo/README.md`](demo/README.md) for more detail, and
+[`demo/capture_instructions.md`](demo/capture_instructions.md) for reproducing a
+Wireshark capture of a normal session (not included in this repo, since Wireshark
+wasn't available in the sandbox this project was built in — see that file for why and
+how to produce one yourself).
