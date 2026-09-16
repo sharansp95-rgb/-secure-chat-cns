@@ -189,6 +189,40 @@ Registered accounts (PBKDF2 password hashes and RSA public keys only) persist in
 gitignored since they hold real credentials and private key material from local
 testing.
 
+## Troubleshooting: certificate mismatch
+
+**Symptom:** a client fails to connect with something like
+`[!] Server certificate verification failed -- refusing to connect. ([SSL:
+CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate ...)`.
+
+**Cause:** `certs/server.crt` was regenerated (e.g. `python certs/generate_certs.py
+--force`) while an *old* `server.py` process was still running — that process loaded
+its certificate into memory at startup and keeps using it until restarted, so it's now
+serving a different cert than the one on disk that clients trust.
+
+**How to tell at a glance (no guessing required):** both the server and any connecting
+client print a short cert fingerprint — the server at startup
+(`Server listening on ... (cert fingerprint: XXXX XXXX XXXX XXXX)`) and the client
+right before it attempts the handshake (`[tls] trusting server cert fingerprint: XXXX
+XXXX XXXX XXXX` — shown in the terminal client's output, or in the GUI's **Wire Log**
+panel). If these two don't match, that's the stale-server bug, confirmed instantly
+instead of debugged manually.
+
+**Fix:**
+```
+python demo/reset_environment.py
+```
+This detects a leftover process on the server's port (asking before killing anything —
+it never kills silently), regenerates `certs/server.crt`/`server.key`, and prints the
+new fingerprint. Restart the server (`python server/server.py`) and confirm its
+startup line shows that *same* fingerprint before launching any clients. It does not
+touch `data/users.json` or `data/keys/` — registered accounts and identity keys are
+unaffected by a cert reset.
+
+Or manually: stop the server (Ctrl+C its terminal), regenerate certs
+(`python certs/generate_certs.py --force`), then start the server again *before*
+starting any clients.
+
 ## Wire protocol
 
 One JSON object per line (newline-terminated), carried inside the TLS tunnel. Every

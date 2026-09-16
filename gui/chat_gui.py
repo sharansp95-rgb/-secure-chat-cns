@@ -530,7 +530,12 @@ class ChatGUI(tk.Tk):
         public key -- exactly what client.py's authenticate()/main() do for
         the terminal client, just without any input()/print()."""
         try:
-            sock = connect_tls(host, port)
+            sock = connect_tls(
+                host, port,
+                on_cert_fingerprint=lambda fp: self.event_queue.put(
+                    ("tls_cert_fingerprint", {"fingerprint": fp})
+                ),
+            )
         except TLSSetupError as exc:
             self.event_queue.put(("auth_error", {"detail": str(exc)}))
             return
@@ -610,6 +615,11 @@ class ChatGUI(tk.Tk):
         self.after(POLL_INTERVAL_MS, self._poll_events)
 
     def _handle_event(self, kind, data):
+        if kind == "tls_cert_fingerprint":
+            self._append_wire(
+                f"[tls] trusting server cert fingerprint: {data['fingerprint']}", "info")
+            return
+
         if kind == "auth_error":
             self.login_status_var.set(f"Failed: {data.get('detail')}")
             self.register_button.config(state="normal")

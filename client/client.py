@@ -100,6 +100,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from auth.keystore import load_private_key, save_private_key  # noqa: E402
+from certs.generate_certs import cert_fingerprint  # noqa: E402
 from crypto_engine.aes_gcm import DecryptionError, decrypt, encrypt  # noqa: E402
 from crypto_engine.dh_exchange import compute_shared_key  # noqa: E402
 from crypto_engine.dh_exchange import generate_keypair as generate_ecdh_keypair  # noqa: E402
@@ -155,7 +156,8 @@ class TLSSetupError(Exception):
     doesn't recognize."""
 
 
-def connect_tls(host, port, cafile=DEFAULT_CAFILE, server_hostname="localhost"):
+def connect_tls(host, port, cafile=DEFAULT_CAFILE, server_hostname="localhost",
+                 on_cert_fingerprint=None):
     """Open a TCP connection to (host, port) and wrap it in TLS, verifying
     the server's certificate against our own self-signed CA.
 
@@ -165,6 +167,18 @@ def connect_tls(host, port, cafile=DEFAULT_CAFILE, server_hostname="localhost"):
     one self-signed certificate this project generated (certs/server.crt),
     loaded as our trusted CA via load_verify_locations, which is the correct
     way to pin trust to a self-signed cert you control.
+
+    Before attempting the handshake, this prints (or, if
+    `on_cert_fingerprint` is given, reports via that callback instead -- see
+    gui/chat_gui.py's Wire Log) the fingerprint of the local certs/server.crt
+    file it's about to trust, in the same short hex format as the server's
+    own startup fingerprint (server.py) and the RSA identity fingerprints
+    from Phase 7a. Comparing the two by eye is what makes a stale-cert
+    situation (server still holding an old cert in memory after
+    certs/server.crt was regenerated on disk without restarting it)
+    diagnosable at a glance instead of a bare CERTIFICATE_VERIFY_FAILED --
+    this is purely diagnostic, not a replacement for the verification
+    failure handling below, which still fires exactly as before.
     """
     if not os.path.exists(cafile):
         raise TLSSetupError(
@@ -172,6 +186,13 @@ def connect_tls(host, port, cafile=DEFAULT_CAFILE, server_hostname="localhost"):
             f"Run `python certs/generate_certs.py` once (the server needs "
             f"the same cert) before connecting."
         )
+
+    with open(cafile, "rb") as f:
+        local_cert_fingerprint = cert_fingerprint(f.read())
+    if on_cert_fingerprint is not None:
+        on_cert_fingerprint(local_cert_fingerprint)
+    else:
+        print(f"[tls] trusting server cert fingerprint: {local_cert_fingerprint}")
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     try:

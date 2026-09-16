@@ -61,6 +61,8 @@ try:
 except ImportError:  # running as part of the `server` package (e.g. tests)
     from server.user_store import get_public_key, register_user, verify_user
 
+from certs.generate_certs import cert_fingerprint_from_file  # noqa: E402
+
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5000
 
@@ -110,6 +112,12 @@ class ChatServer:
         # error surfaces immediately when the server is constructed, not
         # buried inside the accept loop.
         self.ssl_context = build_server_ssl_context(certfile, keyfile)
+        # Fingerprint the cert we actually just loaded into memory -- printed
+        # at startup (see serve_forever) so a stale server (still holding an
+        # old cert after certs/server.crt was regenerated on disk without
+        # restarting it) is diagnosable by comparing fingerprints, instead of
+        # a bare CERTIFICATE_VERIFY_FAILED that gives no hint why.
+        self.cert_fingerprint = cert_fingerprint_from_file(certfile)
         # username -> conn (the TLS-wrapped socket). Guarded by _lock: every
         # client thread mutates it on join/leave and reads it on every
         # route/broadcast.
@@ -322,6 +330,7 @@ class ChatServer:
             srv.bind((self.host, self.port))
             srv.listen()
             print(f"[*] Server listening on {self.host}:{self.port} over TLS "
+                  f"(cert fingerprint: {self.cert_fingerprint}) "
                   f"(routes handshake/chat envelopes; never sees plaintext app "
                   f"secrets or session keys)")
             try:

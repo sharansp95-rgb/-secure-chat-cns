@@ -31,8 +31,35 @@ CERTS_DIR = os.path.dirname(os.path.abspath(__file__))
 KEY_PATH = os.path.join(CERTS_DIR, "server.key")
 CERT_PATH = os.path.join(CERTS_DIR, "server.crt")
 
+sys.path.insert(0, os.path.dirname(CERTS_DIR))  # project root, for crypto_engine imports
+from crypto_engine.signatures import fingerprint  # noqa: E402
+
 VALIDITY_DAYS = 365
 KEY_SIZE = 2048
+
+
+def cert_fingerprint(cert_pem_bytes):
+    """Short, human-readable fingerprint of a TLS certificate: SHA-256 of its
+    DER encoding, formatted identically to the RSA identity fingerprints
+    printed elsewhere in this project (crypto_engine.signatures.fingerprint)
+    -- same visual language, so a user comparing "is the cert my client is
+    about to trust the one this server actually loaded" can eyeball it the
+    same way they already compare RSA identity fingerprints, instead of
+    debugging a bare CERTIFICATE_VERIFY_FAILED.
+
+    Accepts PEM bytes (or str) of the certificate, e.g. the contents of
+    certs/server.crt.
+    """
+    if isinstance(cert_pem_bytes, str):
+        cert_pem_bytes = cert_pem_bytes.encode("ascii")
+    cert = x509.load_pem_x509_certificate(cert_pem_bytes)
+    der_bytes = cert.public_bytes(serialization.Encoding.DER)
+    return fingerprint(der_bytes)
+
+
+def cert_fingerprint_from_file(cert_path=CERT_PATH):
+    with open(cert_path, "rb") as f:
+        return cert_fingerprint(f.read())
 
 
 def generate(force=False):
@@ -88,6 +115,7 @@ def generate(force=False):
     print(f"[*] Generated {KEY_PATH}")
     print(f"[*] Generated {CERT_PATH}")
     print(f"[*] CN=localhost, valid {VALIDITY_DAYS} days from now.")
+    print(f"[*] Cert fingerprint: {cert_fingerprint_from_file(CERT_PATH)}")
     return True
 
 

@@ -15,19 +15,21 @@ counted in the demo time.
 
 Do this once, quietly, before anyone is watching.
 
-**1.1** Open a terminal in the project root and generate the TLS certificate (skip if
-`certs/server.crt` and `certs/server.key` already exist from a previous run):
+**1.1** Open a terminal in the project root and run the environment reset script —
+**recommended even if you think certs already exist**, since you'll likely be on a
+fresh or different machine for the actual presentation, where `certs/` won't exist at
+all yet:
 
 ```
-python certs/generate_certs.py
+python demo/reset_environment.py
 ```
 
-Expected output:
-```
-[*] Generated .../certs/server.key
-[*] Generated .../certs/server.crt
-[*] CN=localhost, valid 365 days from now.
-```
+This reports (and asks before killing) anything already listening on the server's
+port, then (re)generates `certs/server.crt`/`server.key` and prints the fingerprint of
+the cert it just wrote. **Note that fingerprint down** — you'll confirm it matches the
+server's own startup line in the next step. (If you'd rather generate certs manually
+instead: `python certs/generate_certs.py`, skippable if `certs/server.crt` and
+`certs/server.key` already exist from a previous run on this machine.)
 
 **1.2** In that same terminal, start the relay server:
 
@@ -35,11 +37,14 @@ Expected output:
 python server/server.py
 ```
 
-**Confirm it printed exactly this line** before moving on (the port number will read
-`5000` unless you passed `--port`):
+**Confirm it printed a line like this** before moving on (the port will read `5000`
+unless you passed `--port`, and the fingerprint will be whatever `reset_environment.py`
+just printed — **these two must match**; if they don't, see
+["Troubleshooting: certificate mismatch"](../README.md#troubleshooting-certificate-mismatch)
+in the main README):
 
 ```
-[*] Server listening on 127.0.0.1:5000 over TLS (routes handshake/chat envelopes; never sees plaintext app secrets or session keys)
+[*] Server listening on 127.0.0.1:5000 over TLS (cert fingerprint: XXXX XXXX XXXX XXXX) (routes handshake/chat envelopes; never sees plaintext app secrets or session keys)
 ```
 
 Leave this terminal running and visible for the whole demo — minimize it to a corner
