@@ -22,6 +22,21 @@ the first handshake_init; the other client only responds when it receives
 one. This is a local, deterministic tie-break -- it carries no security
 weight, it just avoids a duplicate handshake.
 
+Phase 5 adds RSA-2048 signatures for non-repudiation, on top of (not instead
+of) the Phase 3 ECDH session key. The two serve different purposes: the
+session key proves "encrypted for this pair of peers," while a signature
+proves "this specific long-term identity wrote this specific message" --
+something a third party could later be convinced of, which the symmetric
+session key alone can never provide. On registration this client generates
+its own RSA keypair (crypto_engine/signatures.py), keeps the private key
+local (auth/keystore.py) and sends only the public key to the server. Before
+sending, the plaintext is signed and the {message, signature} pair is what
+gets AES-GCM encrypted -- so the signature is protected in transit too, not
+sent in the clear. After decrypting an incoming message, the signature is
+verified against the sender's public key (fetched once via "get_pubkey" and
+cached for the session); a message that fails verification is warned about
+and discarded, never displayed.
+
 Wire format: one JSON object per line, matching server/server.py. Binary
 fields (public keys, nonce, ciphertext, tag) are base64-encoded for JSON.
 """
@@ -38,8 +53,13 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from auth.keystore import load_private_key, save_private_key  # noqa: E402
 from crypto_engine.aes_gcm import DecryptionError, decrypt, encrypt  # noqa: E402
-from crypto_engine.dh_exchange import compute_shared_key, generate_keypair  # noqa: E402
+from crypto_engine.dh_exchange import compute_shared_key  # noqa: E402
+from crypto_engine.dh_exchange import generate_keypair as generate_ecdh_keypair  # noqa: E402
+from crypto_engine.signatures import deserialize_public_key  # noqa: E402
+from crypto_engine.signatures import generate_keypair as generate_rsa_keypair  # noqa: E402
+from crypto_engine.signatures import serialize_public_key, sign, verify  # noqa: E402
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5000
@@ -81,6 +101,8 @@ class SecureChatClient:
         # Results of "register_result"/"login_result" envelopes, handed from
         # the receiver thread to whoever is blocked waiting in authenticate().
         self.auth_results = queue.Queue()
+        # Results of "pubkey_result" envelopes, similarly handed off.
+        self.pubkey_results = queue.Queue()
 
         # Handshake / session state, guarded by _lock since the receiver
         # thread and the send loop both touch it.
@@ -90,6 +112,15 @@ class SecureChatClient:
         self._handshake_started = False
         self._outgoing_queue = []  # messages typed before the key was ready
 
+        # Phase 5: this identity's long-term RSA signing key (loaded/generated
+        # during authenticate()), and the peer's cached public key used to
+        # verify their signatures. peer_public_key is fetched once via
+        # get_pubkey before the chat loop starts (see fetch_peer_public_key);
+        # it is never re-fetched lazily from inside receive_loop, since that
+        # would deadlock the very queue it would be waiting on.
+        self.rsa_private_key = None
+        self.peer_public_key = None
+
     def send_envelope(self, envelope):
         try:
             self.sock.sendall((json.dumps(envelope) + "\n").encode("utf-8"))
@@ -98,11 +129,37 @@ class SecureChatClient:
 
     # --- authentication --------------------------------------------------
 
-    def register(self, username, password):
-        self.send_envelope({"type": "register", "username": username, "password": password})
+    def register(self, username, password, public_key_pem=None):
+        envelope = {"type": "register", "username": username, "password": password}
+        if public_key_pem:
+            envelope["public_key"] = public_key_pem
+        self.send_envelope(envelope)
 
     def login(self, username, password):
         self.send_envelope({"type": "login", "username": username, "password": password})
+
+    def fetch_peer_public_key(self, timeout=10):
+        """Request the peer's RSA public key from the server and cache it.
+
+        Must be called from the main thread (not from within receive_loop):
+        it blocks on pubkey_results, which is only filled by the receiver
+        thread reading further lines -- calling this from inside that same
+        thread would deadlock.
+        """
+        self.send_envelope({"type": "get_pubkey", "username": self.peer})
+        try:
+            result = self.pubkey_results.get(timeout=timeout)
+        except queue.Empty:
+            return False
+        if result is None or not result.get("success") or not result.get("public_key"):
+            return False
+        try:
+            self.peer_public_key = deserialize_public_key(
+                result["public_key"].encode("utf-8")
+            )
+        except ValueError:
+            return False
+        return True
 
     # --- handshake -----------------------------------------------------
 
@@ -111,7 +168,7 @@ class SecureChatClient:
             if self._handshake_started or self.session_key is not None:
                 return
             self._handshake_started = True
-            private_key, public_bytes = generate_keypair()
+            private_key, public_bytes = generate_ecdh_keypair()
             self._pending_private_key = private_key
 
         print(f"\r[*] Starting key exchange with {self.peer}...\n> ", end="", flush=True)
@@ -124,7 +181,7 @@ class SecureChatClient:
 
     def _handle_handshake_init(self, envelope):
         peer_pub = unb64(envelope["pubkey"])
-        private_key, public_bytes = generate_keypair()
+        private_key, public_bytes = generate_ecdh_keypair()
         session_key = compute_shared_key(private_key, peer_pub)
         # Private key and raw shared secret are never retained past this
         # point -- only the derived session key is kept.
@@ -164,7 +221,26 @@ class SecureChatClient:
     def _encrypt_and_send(self, text):
         with self._lock:
             key = self.session_key
-        box = encrypt(key, text.encode("utf-8"))
+
+        # Sign THEN encrypt: the plaintext is signed with our own long-term
+        # RSA private key first, and the {message, signature} pair is what
+        # actually gets AES-GCM encrypted -- so the signature is protected
+        # in transit just like the message text, never sent in the clear.
+        message_bytes = text.encode("utf-8")
+        if self.rsa_private_key is not None:
+            signature = sign(self.rsa_private_key, message_bytes)
+        else:
+            # No local signing key (e.g. this client never registered/loaded
+            # one) -- send unsigned rather than crash. The receiver will
+            # reject an empty signature against a real public key, so this
+            # only matters for a misconfigured/legacy account.
+            signature = b""
+        inner_payload = json.dumps({
+            "message": text,
+            "signature": b64(signature),
+        }).encode("utf-8")
+
+        box = encrypt(key, inner_payload)
         self.send_envelope({
             "type": "chat",
             "from": self.username,
@@ -188,10 +264,13 @@ class SecureChatClient:
     def _handle_chat(self, envelope):
         with self._lock:
             key = self.session_key
+        sender = envelope.get("from", self.peer)
         if key is None:
-            print(f"\r[!] Received an encrypted message from {envelope.get('from')} "
+            print(f"\r[!] Received an encrypted message from {sender} "
                   f"before a session key was established -- dropped.\n> ", end="", flush=True)
             return
+
+        # Decrypt first (unchanged Phase 3 flow) ...
         try:
             plaintext = decrypt(
                 key,
@@ -200,13 +279,36 @@ class SecureChatClient:
                 unb64(envelope["tag"]),
             )
         except (DecryptionError, KeyError, ValueError):
-            print(f"\r[!] WARNING: message from {envelope.get('from')} failed "
+            print(f"\r[!] WARNING: message from {sender} failed "
                   f"authentication (tampered or wrong key) -- discarded.\n> ",
                   end="", flush=True)
             return
-        sender = envelope.get("from", self.peer)
-        print(f"\r{sender}: {plaintext.decode('utf-8', errors='replace')}\n> ",
-              end="", flush=True)
+
+        # ... then extract {message, signature} and verify the signature
+        # against the sender's cached RSA public key. A message that fails
+        # verification -- tampered, forged, or from an unverifiable identity
+        # -- is warned about and discarded, never displayed.
+        try:
+            inner = json.loads(plaintext.decode("utf-8"))
+            message_text = inner["message"]
+            signature = unb64(inner["signature"])
+        except (json.JSONDecodeError, KeyError, ValueError, UnicodeDecodeError):
+            print(f"\r[!] WARNING: message from {sender} was malformed after "
+                  f"decryption -- discarded.\n> ", end="", flush=True)
+            return
+
+        if self.peer_public_key is None:
+            print(f"\r[!] WARNING: cannot verify signature from {sender} -- "
+                  f"their public key is unknown -- discarded.\n> ", end="", flush=True)
+            return
+
+        if not verify(self.peer_public_key, message_text.encode("utf-8"), signature):
+            print(f"\r[!] WARNING: signature verification FAILED for message "
+                  f"from {sender} -- possible tampering or forgery -- "
+                  f"discarded.\n> ", end="", flush=True)
+            return
+
+        print(f"\r{sender}: {message_text}\n> ", end="", flush=True)
 
     # --- receive loop ------------------------------------------------------
 
@@ -227,6 +329,8 @@ class SecureChatClient:
                     etype = envelope.get("type")
                     if etype in ("register_result", "login_result"):
                         self.auth_results.put(envelope)
+                    elif etype == "pubkey_result":
+                        self.pubkey_results.put(envelope)
                     elif etype == "system":
                         print(f"\r{envelope.get('text', '')}\n> ", end="", flush=True)
                     elif etype == "roster":
@@ -247,8 +351,9 @@ class SecureChatClient:
             if not self.stop_event.is_set():
                 print("\r[!] Disconnected from server.", flush=True)
             self.stop_event.set()
-            # Unblock anyone still waiting on an auth result.
+            # Unblock anyone still waiting on an auth or pubkey result.
             self.auth_results.put(None)
+            self.pubkey_results.put(None)
 
 
 def authenticate(client):
@@ -276,7 +381,12 @@ def authenticate(client):
 
         client.username = username
         if choice in ("1", "register"):
-            client.register(username, password)
+            # Fresh long-term RSA identity for this account: generate it,
+            # keep the private key local (never sent anywhere), and submit
+            # only the public key alongside the registration envelope.
+            rsa_private_key, rsa_public_key = generate_rsa_keypair()
+            public_key_pem = serialize_public_key(rsa_public_key).decode("ascii")
+            client.register(username, password, public_key_pem=public_key_pem)
         else:
             client.login(username, password)
 
@@ -286,6 +396,16 @@ def authenticate(client):
             return False
         if result.get("success"):
             print(f"[*] {result.get('reason', 'Success.')}")
+            if choice in ("1", "register"):
+                save_private_key(username, rsa_private_key)
+                client.rsa_private_key = rsa_private_key
+            else:
+                client.rsa_private_key = load_private_key(username)
+                if client.rsa_private_key is None:
+                    print(f"[!] No local signing key found for '{username}' on this "
+                          f"machine -- outgoing messages will be sent unsigned, and "
+                          f"the recipient's client will reject them. Register from "
+                          f"this machine, or copy your private key here, to fix this.")
             return True
         print(f"[!] {result.get('reason', 'Authentication failed.')} Please try again.")
     return False
@@ -322,14 +442,23 @@ def main():
     if args.username and args.password:
         # Non-interactive path, for scripted demos/tests only.
         client.username = args.username
+        rsa_private_key = None
         if args.register:
-            client.register(args.username, args.password)
+            rsa_private_key, rsa_public_key = generate_rsa_keypair()
+            public_key_pem = serialize_public_key(rsa_public_key).decode("ascii")
+            client.register(args.username, args.password, public_key_pem=public_key_pem)
         else:
             client.login(args.username, args.password)
         result = client.auth_results.get()
         authenticated = bool(result and result.get("success"))
         if result:
             print(f"[{'*' if authenticated else '!'}] {result.get('reason')}")
+        if authenticated:
+            if args.register:
+                save_private_key(args.username, rsa_private_key)
+                client.rsa_private_key = rsa_private_key
+            else:
+                client.rsa_private_key = load_private_key(args.username)
     else:
         authenticated = authenticate(client)
 
@@ -348,6 +477,16 @@ def main():
         client.stop_event.set()
         sock.close()
         sys.exit(1)
+
+    # Fetch the peer's public key once, up front, so incoming signed
+    # messages can be verified as soon as they arrive. If the peer hasn't
+    # registered yet (or has no key on file), chat still proceeds, but every
+    # incoming message will be rejected as unverifiable until reconnecting
+    # after the peer has registered.
+    if not client.fetch_peer_public_key():
+        print(f"[!] Could not fetch {peer}'s public key (they may not be "
+              f"registered yet) -- their messages cannot be verified and "
+              f"will be rejected until you reconnect.")
 
     print(f"[*] Logged in as {client.username}. Chatting securely with {peer}. "
           f"Type a message and press Enter (Ctrl-C to quit).")

@@ -17,6 +17,14 @@ Crucially, the server is a dumb relay for these envelope types:
     (or computes) the derived shared session key -- it just forwards opaque
     bytes from sender to the named recipient.
 
+Phase 5 adds long-term RSA identities for message signing (non-repudiation --
+see crypto_engine/signatures.py and client.py). Each user's RSA *public* key
+is submitted at registration and stored in server/user_store.py alongside
+their password hash; the matching private key never leaves the client. A
+"get_pubkey" envelope lets one client fetch another's public key by username
+so it can verify that user's signatures -- the server just looks up and
+returns what was already public by design.
+
 SECURITY NOTE (Phase 4 -> Phase 6 gap): "register"/"login" envelopes carry the
 password itself (so it can be hashed/checked server-side) in plain JSON. The
 Phase 3 AES-GCM session key only protects *chat* payloads between two peers
@@ -44,9 +52,9 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from user_store import register_user, verify_user
+    from user_store import get_public_key, register_user, verify_user
 except ImportError:  # running as part of the `server` package (e.g. tests)
-    from server.user_store import register_user, verify_user
+    from server.user_store import get_public_key, register_user, verify_user
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5000
@@ -103,6 +111,20 @@ class ChatServer:
             return
         self._send(target, envelope)
 
+    def _handle_get_pubkey(self, conn, envelope):
+        """Answer a "get_pubkey" request directly from user_store -- this is
+        a lookup of already-public information, not a route to another
+        client, so it doesn't matter whether that user is currently online.
+        """
+        target_username = envelope.get("username")
+        public_key_pem = get_public_key(target_username) if target_username else None
+        self._send(conn, {
+            "type": "pubkey_result",
+            "username": target_username,
+            "public_key": public_key_pem,
+            "success": public_key_pem is not None,
+        })
+
     def remove_client(self, conn):
         with self._lock:
             name = None
@@ -141,6 +163,7 @@ class ChatServer:
 
             username = envelope.get("username")
             password = envelope.get("password")
+            public_key_pem = envelope.get("public_key")
             result_type = f"{etype}_result"
             if not username or not password:
                 self._send(conn, {
@@ -159,7 +182,7 @@ class ChatServer:
                 continue
 
             if etype == "register":
-                if not register_user(username, password):
+                if not register_user(username, password, public_key_pem=public_key_pem):
                     self._send(conn, {
                         "type": "register_result", "success": False,
                         "reason": f"username '{username}' is already taken",
@@ -220,6 +243,8 @@ class ChatServer:
                     etype = envelope.get("type")
                     if etype in _RELAYED_TYPES:
                         self.route(envelope, name)
+                    elif etype == "get_pubkey":
+                        self._handle_get_pubkey(conn, envelope)
                     # Unknown/unsupported types are ignored -- the server
                     # only understands routing, never message content.
         except (ConnectionResetError, ConnectionAbortedError, OSError):

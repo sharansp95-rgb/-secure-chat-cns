@@ -13,7 +13,8 @@ Work in progress.
 - **Phase 2 — AES-256-GCM crypto engine (standalone, unit-tested):** done
 - **Phase 3 — ECDH (X25519) key exchange, wired into live chat encryption:** done
 - **Phase 4 — login, identity, and PBKDF2 password hashing:** done
-- Phase 5+ (digital signatures, TLS, capture/replay tests, final report): not started
+- **Phase 5 — RSA-2048 digital signatures for non-repudiation:** done
+- Phase 6+ (TLS, capture/replay tests, final report): not started
 
 ## How to run
 
@@ -41,14 +42,19 @@ python client/client.py --peer alice
 
 Each client first asks you to **register** a new account or **login** to an existing
 one — pick `1) Register` the first time for each username, `2) Login` afterward. The
-password prompt hides your input (it won't echo to the terminal). Once both peers are
-authenticated and online, they automatically perform the ECDH handshake described
-below, then every message either types is AES-256-GCM encrypted before it leaves the
-client and decrypted on arrival. `--host` / `--port` point at a non-default server;
-omit `--peer` to be prompted interactively.
+password prompt hides your input (it won't echo to the terminal). Registering also
+generates a long-term RSA-2048 identity keypair for that account (see "How signing
+works" below) — the private key is saved locally, and only the public key is sent to
+the server. Once both peers are authenticated and online, they automatically perform
+the ECDH handshake described below, fetch each other's RSA public key, and from then
+on every message is signed, AES-256-GCM encrypted before it leaves the client, and
+decrypted + signature-verified on arrival. `--host` / `--port` point at a non-default
+server; omit `--peer` to be prompted interactively.
 
-Registered accounts (as PBKDF2 password hashes only — see below) persist in
-`data/users.json`, which is gitignored since it holds real credentials from local
+Registered accounts (as PBKDF2 password hashes and RSA public keys only — see below)
+persist in `data/users.json`; each account's RSA private key is saved separately as
+`data/keys/<username>_private.pem`. Both `data/users.json` and `data/keys/` are
+gitignored since they hold real credentials and private key material from local
 testing.
 
 > **Security gap (closed in Phase 6):** the register/login envelope carries the
@@ -79,13 +85,34 @@ ever forwards opaque public-key bytes and encrypted (nonce/ciphertext/tag) envel
 it never computes, stores, or sees the shared secret, and a tampered or forged message
 is rejected with a warning instead of being decrypted into garbage.
 
+## How signing works (non-repudiation)
+
+The Phase 3 ECDH session key proves a message was encrypted for this pair of peers,
+but it's symmetric — both sides hold it, so it can never by itself prove *which* of
+them actually wrote a given message to a third party. Phase 5 adds a separate,
+long-term RSA-2048 keypair per user identity to close that gap: at registration a
+client generates its own RSA keypair, keeps the private key on disk locally (see
+`auth/keystore.py`), and sends only the public key to the server, which stores it
+next to that user's password hash. Before sending a chat message, the sender signs
+the plaintext with its own RSA private key (RSA-PSS + SHA-256), then wraps
+`{message, signature}` together as the payload that gets AES-256-GCM encrypted —
+**sign, then encrypt** — so the signature travels protected inside the same
+ciphertext as the message, never sent in the clear. On the receiving side the order
+reverses: **decrypt, then verify** — the client AES-GCM-decrypts the envelope exactly
+as in Phase 3, unwraps `{message, signature}`, and only then checks the signature
+against the sender's RSA public key (fetched once via a `get_pubkey` request to the
+server and cached for the session). A message whose signature doesn't check out —
+tampered content, a forged signature, or a signature checked against the wrong public
+key — is never displayed; the client prints a clear warning and discards it, exactly
+as an unauthenticated (tampering-detected) AES-GCM message is discarded in Phase 3.
+
 ## Wire protocol
 
 One JSON object per line (newline-terminated). Every envelope has a `"type"` field:
 
 | type | direction | carries |
 |---|---|---|
-| `register` | client → server | `username`, `password` |
+| `register` | client → server | `username`, `password`, `public_key` (RSA PEM text) |
 | `register_result` | server → client | `success`, `reason` |
 | `login` | client → server | `username`, `password` |
 | `login_result` | server → client | `success`, `reason` |
@@ -94,13 +121,17 @@ One JSON object per line (newline-terminated). Every envelope has a `"type"` fie
 | `user_joined` | server → client | `username` of a newly-connected peer |
 | `handshake_init` | client ↔ client (via server) | `from`, `to`, `pubkey` (base64, 32 raw bytes) |
 | `handshake_response` | client ↔ client (via server) | `from`, `to`, `pubkey` (base64, 32 raw bytes) |
-| `chat` | client ↔ client (via server) | `from`, `to`, `nonce`, `ciphertext`, `tag` (all base64) |
+| `get_pubkey` | client → server | `username` (whose RSA public key to look up) |
+| `pubkey_result` | server → client | `username`, `public_key` (RSA PEM text or null), `success` |
+| `chat` | client ↔ client (via server) | `from`, `to`, `nonce`, `ciphertext`, `tag` (all base64); the plaintext AES-GCM decrypts to is itself `{"message", "signature"}` JSON |
 
 A connection must complete a successful `register` or `login` exchange before the
 server admits it to the roster or accepts any handshake/chat envelope from it. The
 server routes `handshake_init` / `handshake_response` / `chat` envelopes to the named
 `to` recipient only, based on the sender's own claimed `from` field; it never inspects
-or needs to understand their payload beyond that routing.
+or needs to understand their payload beyond that routing. `get_pubkey` is answered
+directly by the server from its user store (the requested user doesn't need to be
+online — a public key is public information regardless of presence).
 
 ## Running the tests
 
@@ -151,3 +182,21 @@ assert not verify_password("wrong guess", stored)
 
 `server/user_store.py` persists only that encoded hash string per username, in
 `data/users.json` — the plaintext password is never written to disk.
+
+`crypto_engine/signatures.py` — RSA-2048 signatures (Phase 5), RSA-PSS padding +
+SHA-256, with PEM (de)serialization helpers for moving keys to/from disk and the wire:
+
+```python
+from crypto_engine.signatures import generate_keypair, sign, verify
+
+private_key, public_key = generate_keypair()
+signature = sign(private_key, b"hello")
+assert verify(public_key, b"hello", signature) is True
+assert verify(public_key, b"tampered", signature) is False  # never raises
+```
+
+`auth/keystore.py` saves each account's RSA private key locally as an unencrypted PEM
+file under `data/keys/<username>_private.pem` (gitignored). In a production system
+that file would itself be encrypted at rest (e.g. wrapped under a key derived from the
+user's login password); storing it as plain PEM here is a deliberate scope reduction
+for this course project, not an oversight — see the comment in `keystore.py`.
