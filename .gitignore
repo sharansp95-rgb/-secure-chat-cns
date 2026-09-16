@@ -9,3 +9,10 @@ venv/
 # Local user store: holds real hashed credentials from testing, never
 # committed. See server/user_store.py.
 data/
+
+# TLS cert + key, generated locally per teammate by certs/generate_certs.py
+# (see README.md). A committed private key would let anyone with repo
+# access impersonate the server, which defeats the point of TLS.
+certs/*.key
+certs/*.crt
+certs/*.pem

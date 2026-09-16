@@ -14,7 +14,8 @@ Work in progress.
 - **Phase 3 — ECDH (X25519) key exchange, wired into live chat encryption:** done
 - **Phase 4 — login, identity, and PBKDF2 password hashing:** done
 - **Phase 5 — RSA-2048 digital signatures for non-repudiation:** done
-- Phase 6+ (TLS, capture/replay tests, final report): not started
+- **Phase 6 — TLS transport encryption:** done
+- Phase 7+ (Wireshark capture/tamper/replay tests, final report): not started
 
 ## How to run
 
@@ -23,6 +24,19 @@ Requires Python 3.8+. Install dependencies first:
 ```
 pip install -r requirements.txt
 ```
+
+**0. One-time per teammate: generate a local TLS certificate.** The server and
+client both need `certs/server.crt` / `certs/server.key`, which are gitignored (a
+committed private key would let anyone with repo access impersonate the server) and
+must be generated locally, once, by each person running this project:
+
+```
+python certs/generate_certs.py
+```
+
+This writes a self-signed cert for `CN=localhost`, valid 365 days. Re-run with
+`--force` to regenerate (then restart the server and re-run this on every client, too
+— an old cert and a new one won't match).
 
 **1. Start the server** (one terminal):
 
@@ -57,13 +71,12 @@ persist in `data/users.json`; each account's RSA private key is saved separately
 gitignored since they hold real credentials and private key material from local
 testing.
 
-> **Security gap (closed in Phase 6):** the register/login envelope carries the
-> password itself, over a socket that isn't encrypted yet at this phase — the AES-GCM
-> session key from Phase 3 only protects the chat payload *between two peers*, after
-> their handshake, and doesn't exist yet at login time. That means a network observer
-> between a client and the server could currently see a password in transit. This is a
-> known, deliberate gap: wrapping the whole client↔server socket in TLS is Phase 6's
-> job, and we are not attempting a workaround here.
+**Gap closed:** as of Phase 6, the entire connection — including the register/login
+envelope, which used to be readable JSON on the wire — is wrapped in TLS before a
+single byte of the envelope protocol is sent. A network observer between a client and
+the server now sees only opaque TLS records, not `"type": "login"` or a password. See
+"How TLS layers with the app-level crypto" below for how this relates to the
+AES-GCM/RSA protections that were already there.
 
 ## How the handshake works
 
@@ -106,9 +119,37 @@ tampered content, a forged signature, or a signature checked against the wrong p
 key — is never displayed; the client prints a clear warning and discards it, exactly
 as an unauthenticated (tampering-detected) AES-GCM message is discarded in Phase 3.
 
+## How TLS layers with the app-level crypto
+
+Phase 6 adds TLS (`ssl.PROTOCOL_TLS_SERVER` / `PROTOCOL_TLS_CLIENT`) around the whole
+client↔server TCP connection, wrapping every socket **before** any envelope — including
+the very first register/login — is read or written. This is a **transport-layer**
+protection: it makes the connection itself opaque to anyone on the network path, so an
+observer between a client and the server can no longer see the JSON structure, field
+names, or content of anything at all, not even metadata like `"type": "login"`. It sits
+alongside, not in place of, the **application-layer** crypto from Phases 2/3/5 — AES-GCM
+session keys and RSA signatures — which protect message content and identity end-to-end
+between the two chat *peers themselves*, independent of transport. The distinction that
+matters: TLS protects data only while it's in transit to/from the server; the server
+itself sees the connection in the clear once TLS terminates there (it's the trusted
+relay, not an untrusted network link). AES-GCM + RSA signatures, by contrast, protect a
+chat message even from the server — the server only ever sees opaque ciphertext and
+routing metadata, never plaintext content, a private key, or a session key, whether or
+not TLS is present. Put together: if the *network* were compromised (a MITM on the wire),
+TLS is the layer that stops them; if the *relay server itself* were compromised, it's
+still the AES-GCM/RSA layer doing the protecting, because the server never held the
+keys needed to read chat content or forge a signature in the first place. The client
+does not use `check_hostname=False` or `CERT_NONE` to sidestep certificate verification
+— that would accept a certificate from literally anyone, which defeats the point of
+using TLS at all. Instead it pins trust to exactly the one self-signed certificate this
+project generated (`certs/server.crt`, loaded via `load_verify_locations`), so a
+different server presenting a different certificate is rejected at the TLS handshake,
+before any envelope is ever sent.
+
 ## Wire protocol
 
-One JSON object per line (newline-terminated). Every envelope has a `"type"` field:
+One JSON object per line (newline-terminated), carried inside the TLS tunnel described
+above. Every envelope has a `"type"` field:
 
 | type | direction | carries |
 |---|---|---|
@@ -200,3 +241,15 @@ file under `data/keys/<username>_private.pem` (gitignored). In a production syst
 that file would itself be encrypted at rest (e.g. wrapped under a key derived from the
 user's login password); storing it as plain PEM here is a deliberate scope reduction
 for this course project, not an oversight — see the comment in `keystore.py`.
+
+`certs/generate_certs.py` (Phase 6) generates the self-signed TLS cert + key used by
+`server.py`/`client.py`, using the `cryptography` library directly (not the `openssl`
+CLI), so it produces an identical result on every teammate's machine:
+
+```
+python certs/generate_certs.py           # writes certs/server.key + certs/server.crt
+python certs/generate_certs.py --force   # regenerate, overwriting existing certs
+```
+
+Both output files are gitignored — see "How to run" above for why, and for the
+one-time setup step every teammate needs to run.

@@ -25,27 +25,32 @@ their password hash; the matching private key never leaves the client. A
 so it can verify that user's signatures -- the server just looks up and
 returns what was already public by design.
 
-SECURITY NOTE (Phase 4 -> Phase 6 gap): "register"/"login" envelopes carry the
-password itself (so it can be hashed/checked server-side) in plain JSON. The
-Phase 3 AES-GCM session key only protects *chat* payloads between two peers
-that have already completed a handshake -- it does not exist yet at login
-time, and it wouldn't cover the client<->server leg anyway. That means the
-raw TCP socket the register/login envelope travels over is NOT yet encrypted
-at this phase; a network observer between client and server could see a
-password in transit. This is a known, deliberate gap: wrapping the whole
-socket in TLS is exactly Phase 6's job, and we are not trying to work around
-it early with an ad hoc fix here.
+Phase 6 closes the register/login plaintext-on-the-wire gap called out above:
+every accepted connection is now wrapped in TLS (ssl.PROTOCOL_TLS_SERVER)
+*before* a single byte of the envelope protocol is read, so even the very
+first "register"/"login" envelope travels inside the TLS tunnel. This is a
+transport-layer protection, layered on top of (not instead of) the
+application-layer crypto from Phases 2/3/5: TLS keeps the connection itself
+opaque to a network observer (nobody outside can even see "type": "login" or
+the JSON structure), while AES-GCM + the RSA signatures still protect chat
+content and identity even in a scenario where the relay server itself is
+compromised (TLS only protects data in transit to/from the server, not what
+the server does with it once decrypted at that endpoint). Certs are
+generated locally by each teammate via certs/generate_certs.py -- see
+README.md -- and are never committed (a shared private key would let anyone
+with repo access impersonate the server).
 
-Wire format: one UTF-8 JSON object per line (newline-terminated). Every
-envelope has a "type" field. Envelopes that name a "to" recipient are
-unicast to that user if online; everything else (register, login, roster) is
-handled directly by the server.
+Wire format: one UTF-8 JSON object per line (newline-terminated), now
+carried inside the TLS tunnel. Every envelope has a "type" field. Envelopes
+that name a "to" recipient are unicast to that user if online; everything
+else (register, login, roster) is handled directly by the server.
 """
 
 import argparse
 import json
 import os
 import socket
+import ssl
 import sys
 import threading
 
@@ -59,17 +64,55 @@ except ImportError:  # running as part of the `server` package (e.g. tests)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5000
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_CERT_PATH = os.path.join(_PROJECT_ROOT, "certs", "server.crt")
+DEFAULT_KEY_PATH = os.path.join(_PROJECT_ROOT, "certs", "server.key")
+
+
+class CertsMissingError(Exception):
+    """Raised when certs/server.crt or certs/server.key can't be found."""
+
+
+def build_server_ssl_context(certfile=DEFAULT_CERT_PATH, keyfile=DEFAULT_KEY_PATH):
+    """Build the server-side TLS context, loaded with our self-signed cert.
+
+    Raises CertsMissingError with a clear, actionable message rather than
+    letting a raw FileNotFoundError/SSLError surface if the certs haven't
+    been generated yet.
+    """
+    if not os.path.exists(certfile) or not os.path.exists(keyfile):
+        raise CertsMissingError(
+            f"TLS certificate/key not found at {certfile} / {keyfile}.\n"
+            f"Run `python certs/generate_certs.py` once to generate them "
+            f"before starting the server."
+        )
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    try:
+        context.load_cert_chain(certfile=certfile, keyfile=keyfile)
+    except ssl.SSLError as exc:
+        raise CertsMissingError(
+            f"Failed to load TLS certificate/key from {certfile} / {keyfile}: {exc}\n"
+            f"Try regenerating them with `python certs/generate_certs.py --force`."
+        ) from exc
+    return context
+
 # Envelope types relayed verbatim to a specific "to" recipient without the
 # server inspecting their payload beyond routing fields.
 _RELAYED_TYPES = {"handshake_init", "handshake_response", "chat"}
 
 
 class ChatServer:
-    def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT):
+    def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT,
+                 certfile=DEFAULT_CERT_PATH, keyfile=DEFAULT_KEY_PATH):
         self.host = host
         self.port = port
-        # username -> conn. Guarded by _lock: every client thread mutates it
-        # on join/leave and reads it on every route/broadcast.
+        # Built eagerly (not lazily in serve_forever) so a missing-certs
+        # error surfaces immediately when the server is constructed, not
+        # buried inside the accept loop.
+        self.ssl_context = build_server_ssl_context(certfile, keyfile)
+        # username -> conn (the TLS-wrapped socket). Guarded by _lock: every
+        # client thread mutates it on join/leave and reads it on every
+        # route/broadcast.
         self.clients = {}
         self._lock = threading.Lock()
 
@@ -255,18 +298,37 @@ class ChatServer:
                 print(f"[-] {removed} disconnected")
                 self.broadcast_system(f"*** {removed} left the chat ***")
 
+    def _handle_raw_connection(self, conn, addr):
+        """Perform the TLS handshake for one accepted raw connection, then
+        hand off to handle_client. Runs in its own thread (spawned right
+        after accept(), before any handshake happens) so one slow or hostile
+        TLS handshake -- or a client that never speaks TLS at all -- blocks
+        only this thread, never the accept loop or other clients.
+        """
+        try:
+            tls_conn = self.ssl_context.wrap_socket(conn, server_side=True)
+        except (ssl.SSLError, OSError) as exc:
+            print(f"[!] TLS handshake failed with {addr[0]}:{addr[1]} -- {exc}")
+            try:
+                conn.close()
+            except OSError:
+                pass
+            return
+        self.handle_client(tls_conn, addr)
+
     def serve_forever(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             srv.bind((self.host, self.port))
             srv.listen()
-            print(f"[*] Server listening on {self.host}:{self.port} "
-                  f"(routes handshake/chat envelopes; never sees plaintext or keys)")
+            print(f"[*] Server listening on {self.host}:{self.port} over TLS "
+                  f"(routes handshake/chat envelopes; never sees plaintext app "
+                  f"secrets or session keys)")
             try:
                 while True:
                     conn, addr = srv.accept()
                     threading.Thread(
-                        target=self.handle_client, args=(conn, addr), daemon=True
+                        target=self._handle_raw_connection, args=(conn, addr), daemon=True
                     ).start()
             except KeyboardInterrupt:
                 print("\n[*] Shutting down")
@@ -281,8 +343,15 @@ def main():
     parser = argparse.ArgumentParser(description="Secure chat relay server")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--certfile", default=DEFAULT_CERT_PATH)
+    parser.add_argument("--keyfile", default=DEFAULT_KEY_PATH)
     args = parser.parse_args()
-    ChatServer(args.host, args.port).serve_forever()
+    try:
+        server = ChatServer(args.host, args.port, args.certfile, args.keyfile)
+    except CertsMissingError as exc:
+        print(f"[!] {exc}")
+        sys.exit(1)
+    server.serve_forever()
 
 
 if __name__ == "__main__":

@@ -10,11 +10,15 @@ section), after which every chat message is encrypted with
 crypto_engine/aes_gcm.py before it is sent, and decrypted after it is
 received -- the server only ever sees the encrypted chat envelope.
 
-SECURITY NOTE: the register/login envelope carries the password itself (so
-the server can hash/check it) over the plain TCP socket -- that leg is not
-yet encrypted at this phase. See the note in server/server.py and the
-README's Phase 4 section: this is a known, deliberate gap closed by Phase 6
-(TLS), not something patched around here.
+Phase 6 wraps the whole connection in TLS before anything -- including the
+first register/login envelope -- is sent, closing the plaintext-on-the-wire
+gap noted above. The client verifies the server's certificate against our
+own self-signed CA (certs/server.crt, generated locally by
+certs/generate_certs.py) via load_verify_locations, rather than disabling
+verification -- so this is a real trust check, not just "encrypted but to
+anyone." TLS is a transport-layer protection: it keeps the connection opaque
+to a network observer, on top of (not instead of) the AES-GCM + RSA
+signature protections applied to the message content itself.
 
 Handshake initiation rule: to avoid both sides racing to start a handshake at
 once, only the client whose username sorts lexicographically *lower* sends
@@ -48,6 +52,7 @@ import json
 import os
 import queue
 import socket
+import ssl
 import sys
 import threading
 
@@ -63,6 +68,62 @@ from crypto_engine.signatures import serialize_public_key, sign, verify  # noqa:
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5000
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_CAFILE = os.path.join(_PROJECT_ROOT, "certs", "server.crt")
+
+
+class TLSSetupError(Exception):
+    """Raised when we can't build/complete a trusted TLS connection to the
+    server -- missing CA file, handshake failure, or certificate the client
+    doesn't recognize."""
+
+
+def connect_tls(host, port, cafile=DEFAULT_CAFILE, server_hostname="localhost"):
+    """Open a TCP connection to (host, port) and wrap it in TLS, verifying
+    the server's certificate against our own self-signed CA.
+
+    Deliberately does NOT set check_hostname=False or CERT_NONE as a
+    shortcut -- that would accept literally any certificate from anyone,
+    defeating the entire point of using TLS. Instead we trust exactly the
+    one self-signed certificate this project generated (certs/server.crt),
+    loaded as our trusted CA via load_verify_locations, which is the correct
+    way to pin trust to a self-signed cert you control.
+    """
+    if not os.path.exists(cafile):
+        raise TLSSetupError(
+            f"TLS CA certificate not found at {cafile}.\n"
+            f"Run `python certs/generate_certs.py` once (the server needs "
+            f"the same cert) before connecting."
+        )
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    try:
+        context.load_verify_locations(cafile=cafile)
+    except ssl.SSLError as exc:
+        raise TLSSetupError(f"Could not load CA certificate from {cafile}: {exc}") from exc
+
+    raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        raw_sock.connect((host, port))
+    except OSError as exc:
+        raw_sock.close()
+        raise TLSSetupError(f"Could not connect to {host}:{port} -- {exc}") from exc
+
+    try:
+        tls_sock = context.wrap_socket(raw_sock, server_hostname=server_hostname)
+    except ssl.SSLCertVerificationError as exc:
+        raw_sock.close()
+        raise TLSSetupError(
+            f"Server certificate verification failed -- refusing to connect. "
+            f"({exc})\nThis usually means the server is using a different "
+            f"cert than the one in {cafile}; make sure both sides ran the "
+            f"same certs/generate_certs.py output."
+        ) from exc
+    except ssl.SSLError as exc:
+        raw_sock.close()
+        raise TLSSetupError(f"TLS handshake failed: {exc}") from exc
+    return tls_sock
 
 
 def b64(data):
@@ -422,6 +483,9 @@ def main():
                          help="register a new account instead of logging in "
                               "(used with --username/--password to skip prompts)")
     parser.add_argument("--peer", help="username of the peer to chat securely with")
+    parser.add_argument("--cafile", default=DEFAULT_CAFILE,
+                         help="CA certificate to verify the server against "
+                              "(default: certs/server.crt)")
     args = parser.parse_args()
 
     peer = args.peer or input("Peer username to chat securely with: ").strip()
@@ -429,11 +493,10 @@ def main():
         print("A peer username is required.")
         sys.exit(1)
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        sock.connect((args.host, args.port))
-    except OSError as exc:
-        print(f"[!] Could not connect to {args.host}:{args.port} -- {exc}")
+        sock = connect_tls(args.host, args.port, cafile=args.cafile)
+    except TLSSetupError as exc:
+        print(f"[!] {exc}")
         sys.exit(1)
 
     client = SecureChatClient(sock, username=None, peer=peer)
