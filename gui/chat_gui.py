@@ -19,6 +19,10 @@ main loop drains that queue on a `root.after()` timer and does all actual
 widget updates there. This is the standard safe pattern for Tkinter +
 background threads (Tkinter itself is not thread-safe).
 
+Visual design: dark theme, WhatsApp-style message bubbles, font-availability
+fallback -- see _pick_font() and the Theme class below. This is presentation
+only; nothing in this section touches SecureChatClient or the event shape.
+
 Run:  python gui/chat_gui.py
 """
 
@@ -30,6 +34,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -126,12 +131,116 @@ def format_envelope_line(direction, envelope):
     return f"{direction} {etype}: {json.dumps(e)[:120]}", False
 
 
+# ============================================================================
+# Visual theme
+# ============================================================================
+#
+# Font fallback: "Poppins" is a nice-looking modern font but is NOT installed
+# by default on Windows/macOS/most Linux distros -- hardcoding it would
+# silently fall back to Tk's ugly default on any machine that doesn't have it
+# installed. _pick_font() checks tkinter.font.families() (only queryable
+# *after* a Tk root exists) and walks a priority list, returning the first
+# family that's actually present.
+_UI_FONT_PRIORITY = ["Poppins", "Segoe UI", "Helvetica", "Arial"]
+_MONO_FONT_PRIORITY = ["Consolas", "Cascadia Mono", "Courier New", "Courier"]
+
+
+def _pick_font(priority_list, families):
+    for name in priority_list:
+        if name in families:
+            return name
+    return tkfont.nametofont("TkDefaultFont").actual("family")  # Tk's own default, last resort
+
+
+class Theme:
+    """Dark, high-contrast color palette + the resolved font families.
+    Built once a Tk root exists (needed for the font-availability check)."""
+
+    def __init__(self, root):
+        families = set(tkfont.families(root))
+        self.ui_font = _pick_font(_UI_FONT_PRIORITY, families)
+        self.mono_font = _pick_font(_MONO_FONT_PRIORITY, families)
+
+        # Backgrounds -- dark neutral, not pure black (#121212/#1a1a1a read
+        # as more deliberate/professional than #000000).
+        self.bg_app = "#121212"
+        self.bg_panel = "#1a1a1a"       # chat/login panel background
+        self.bg_panel_alt = "#17191c"   # wire log: a slightly different dark shade
+        self.bg_input = "#242424"
+        self.bg_bubble_sent = "#128c7e"      # WhatsApp-teal, sent bubble
+        self.bg_bubble_recv = "#2a2a2a"      # dark gray, received bubble
+        self.bg_fingerprint = "#0b3d36"      # highlighted strip behind the fingerprint
+
+        # Foregrounds -- high contrast against the above.
+        self.fg_primary = "#e8e8e8"
+        self.fg_secondary = "#999999"
+        self.fg_on_sent = "#eafff9"
+        self.fg_on_recv = "#e8e8e8"
+        self.fg_accent = "#25d366"          # WhatsApp-green accent (fingerprint, success)
+        self.fg_warning = "#ff5c5c"
+
+        # Wire log syntax colors (kept from the original design, re-checked
+        # for contrast against the new, slightly bluer dark panel shade).
+        self.wire_sent = "#7fc7ff"
+        self.wire_recv = "#b6f27f"
+        self.wire_warning = "#ff5c5c"
+        self.wire_info = "#c9c9c9"
+
+    def apply_ttk(self, style):
+        """ttk theming covers Frame/Label/Entry/Button/Panedwindow/Scrollbar.
+        It does NOT reach raw Tk widgets (Text, Canvas) -- those get bg/fg
+        set directly wherever they're created below."""
+        style.theme_use("clam")  # 'clam' is the ttk base theme that actually
+        # honors custom colors well; the default Windows/aqua themes mostly
+        # ignore background/foreground options on several widgets.
+
+        style.configure(".", background=self.bg_app, foreground=self.fg_primary,
+                         font=(self.ui_font, 10))
+        style.configure("TFrame", background=self.bg_app)
+        style.configure("Panel.TFrame", background=self.bg_panel)
+        style.configure("TLabel", background=self.bg_app, foreground=self.fg_primary,
+                         font=(self.ui_font, 10))
+        style.configure("Panel.TLabel", background=self.bg_panel, foreground=self.fg_primary)
+        style.configure("Secondary.TLabel", background=self.bg_app,
+                         foreground=self.fg_secondary, font=(self.ui_font, 9))
+        style.configure("Title.TLabel", background=self.bg_app, foreground=self.fg_primary,
+                         font=(self.ui_font, 15, "bold"))
+        style.configure("Header.TLabel", background=self.bg_panel, foreground=self.fg_primary,
+                         font=(self.ui_font, 12, "bold"))
+        style.configure("SectionTitle.TLabel", background=self.bg_panel,
+                         foreground=self.fg_secondary, font=(self.ui_font, 10, "bold"))
+        style.configure("Warning.TLabel", background=self.bg_app, foreground=self.fg_warning,
+                         font=(self.ui_font, 9, "bold"))
+        style.configure("Fingerprint.TLabel", background=self.bg_fingerprint,
+                         foreground=self.fg_accent, font=(self.mono_font, 13, "bold"))
+
+        style.configure("TEntry", fieldbackground=self.bg_input, foreground=self.fg_primary,
+                         insertcolor=self.fg_primary, bordercolor=self.bg_input,
+                         lightcolor=self.bg_input, darkcolor=self.bg_input)
+        style.map("TEntry", fieldbackground=[("readonly", self.bg_input)])
+
+        style.configure("TButton", background=self.bg_bubble_sent, foreground="#ffffff",
+                         font=(self.ui_font, 10, "bold"), padding=(14, 8), borderwidth=0)
+        style.map("TButton",
+                  background=[("active", "#17a390"), ("disabled", "#3a3a3a")],
+                  foreground=[("disabled", "#8a8a8a")])
+
+        style.configure("TPanedwindow", background=self.bg_app)
+        style.configure("TScrollbar", background=self.bg_panel, troughcolor=self.bg_app,
+                         bordercolor=self.bg_app, arrowcolor=self.fg_secondary)
+
+
 class ChatGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Secure Chat (GUI)")
-        self.geometry("980x620")
-        self.minsize(760, 480)
+        self.geometry("1040x660")
+        self.minsize(780, 480)
+
+        self.theme = Theme(self)
+        self.configure(background=self.theme.bg_app)
+        style = ttk.Style(self)
+        self.theme.apply_ttk(style)
 
         # Thread-safe: SecureChatClient's event_callback (invoked from
         # background threads) only ever does event_queue.put(...). All
@@ -153,99 +262,233 @@ class ChatGUI(tk.Tk):
     # --- screen scaffolding -------------------------------------------
 
     def _build_login_screen(self):
-        frame = ttk.Frame(self, padding=24)
-        self.login_frame = frame
+        t = self.theme
+        outer = tk.Frame(self, background=t.bg_app)
+        self.login_frame = outer
 
-        ttk.Label(frame, text="Secure Chat -- Login / Register",
-                  font=("Segoe UI", 14, "bold")).grid(row=0, column=0, columnspan=2, pady=(0, 16))
+        card = tk.Frame(outer, background=t.bg_panel, padx=36, pady=32,
+                         highlightbackground="#2a2a2a", highlightthickness=1)
+        card.place(relx=0.5, rely=0.5, anchor="center")
+
+        ttk.Label(card, text="Secure Chat", style="Header.TLabel",
+                  font=(t.ui_font, 20, "bold")).grid(
+            row=0, column=0, columnspan=2, pady=(0, 4), sticky="w")
+        ttk.Label(card, text="Register a new identity or log in to an existing one.",
+                  style="Panel.TLabel", foreground=t.fg_secondary).grid(
+            row=1, column=0, columnspan=2, pady=(0, 20), sticky="w")
 
         fields = [
-            ("Server host:", "host_var", DEFAULT_HOST),
-            ("Server port:", "port_var", str(DEFAULT_PORT)),
-            ("Username:", "username_var", ""),
-            ("Peer username:", "peer_var", ""),
+            ("Server host", "host_var", DEFAULT_HOST),
+            ("Server port", "port_var", str(DEFAULT_PORT)),
+            ("Username", "username_var", ""),
+            ("Peer username", "peer_var", ""),
         ]
-        for i, (label, attr, default) in enumerate(fields, start=1):
-            ttk.Label(frame, text=label).grid(row=i, column=0, sticky="e", pady=4, padx=(0, 8))
+        row = 2
+        for label, attr, default in fields:
+            ttk.Label(card, text=label, style="Panel.TLabel").grid(
+                row=row, column=0, sticky="w", pady=(0, 3))
             var = tk.StringVar(value=default)
             setattr(self, attr, var)
-            ttk.Entry(frame, textvariable=var, width=30).grid(row=i, column=1, sticky="w", pady=4)
+            entry = ttk.Entry(card, textvariable=var, width=32, font=(t.ui_font, 10))
+            entry.grid(row=row + 1, column=0, columnspan=2, sticky="ew", pady=(0, 14))
+            row += 2
 
-        row = len(fields) + 1
-        ttk.Label(frame, text="Password:").grid(row=row, column=0, sticky="e", pady=4, padx=(0, 8))
+        ttk.Label(card, text="Password", style="Panel.TLabel").grid(
+            row=row, column=0, sticky="w", pady=(0, 3))
         self.password_var = tk.StringVar()
-        ttk.Entry(frame, textvariable=self.password_var, show="*", width=30).grid(
-            row=row, column=1, sticky="w", pady=4)
+        ttk.Entry(card, textvariable=self.password_var, show="•", width=32,
+                  font=(t.ui_font, 10)).grid(
+            row=row + 1, column=0, columnspan=2, sticky="ew", pady=(0, 18))
+        row += 2
 
-        button_row = row + 1
-        button_frame = ttk.Frame(frame)
-        button_frame.grid(row=button_row, column=0, columnspan=2, pady=(16, 4))
+        button_frame = tk.Frame(card, background=t.bg_panel)
+        button_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 4))
         self.register_button = ttk.Button(button_frame, text="Register",
                                            command=lambda: self._start_auth("register"))
-        self.register_button.pack(side="left", padx=4)
+        self.register_button.pack(side="left", expand=True, fill="x", padx=(0, 6))
         self.login_button = ttk.Button(button_frame, text="Login",
                                         command=lambda: self._start_auth("login"))
-        self.login_button.pack(side="left", padx=4)
+        self.login_button.pack(side="left", expand=True, fill="x", padx=(6, 0))
+        row += 1
 
         self.login_status_var = tk.StringVar(value="")
-        self.login_status_label = ttk.Label(frame, textvariable=self.login_status_var,
-                                             foreground="#a80000", wraplength=420)
-        self.login_status_label.grid(row=button_row + 1, column=0, columnspan=2, pady=(8, 0))
+        ttk.Label(card, textvariable=self.login_status_var, style="Warning.TLabel",
+                  background=t.bg_panel, wraplength=340, justify="left").grid(
+            row=row, column=0, columnspan=2, pady=(12, 0), sticky="w")
 
     def _build_chat_screen(self):
-        frame = ttk.Frame(self)
+        t = self.theme
+        frame = tk.Frame(self, background=t.bg_app)
         self.chat_frame = frame
 
-        # -- top bar: fingerprint, prominent, for out-loud comparison --
-        top = ttk.Frame(frame, padding=(10, 8))
+        # -- top bar: identity + prominent fingerprint strip --
+        top = tk.Frame(frame, background=t.bg_panel, padx=16, pady=10)
         top.pack(side="top", fill="x")
         self.header_var = tk.StringVar(value="")
-        ttk.Label(top, textvariable=self.header_var, font=("Segoe UI", 11, "bold")).pack(
-            side="left")
+        ttk.Label(top, textvariable=self.header_var, style="Header.TLabel").pack(
+            side="left", anchor="w")
+
+        fp_strip = tk.Frame(top, background=t.bg_fingerprint, padx=12, pady=6)
+        fp_strip.pack(side="right")
         self.fingerprint_var = tk.StringVar(value="Fingerprint: (handshake not complete yet)")
-        ttk.Label(top, textvariable=self.fingerprint_var, font=("Consolas", 11, "bold"),
-                  foreground="#0b5fa5").pack(side="right")
+        ttk.Label(fp_strip, textvariable=self.fingerprint_var, style="Fingerprint.TLabel",
+                  background=t.bg_fingerprint).pack()
 
         self.conn_status_var = tk.StringVar(value="")
-        ttk.Label(frame, textvariable=self.conn_status_var, foreground="#a80000",
-                  padding=(10, 0)).pack(side="top", fill="x")
+        ttk.Label(frame, textvariable=self.conn_status_var, style="Warning.TLabel",
+                  padding=(16, 4)).pack(side="top", fill="x")
 
-        # -- split pane: plaintext chat (left) / wire log (right) --
+        # -- split pane: bubble conversation (left) / wire log (right) --
         paned = ttk.Panedwindow(frame, orient="horizontal")
-        paned.pack(side="top", fill="both", expand=True, padx=8, pady=8)
+        paned.pack(side="top", fill="both", expand=True, padx=10, pady=10)
 
-        chat_pane = ttk.Frame(paned)
-        ttk.Label(chat_pane, text="Conversation (what you see)",
-                  font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        self.chat_text = tk.Text(chat_pane, wrap="word", state="disabled", height=20)
-        self.chat_text.pack(side="top", fill="both", expand=True)
-        self.chat_text.tag_config("me", foreground="#0b5fa5")
-        self.chat_text.tag_config("peer", foreground="#1a7a1a")
-        self.chat_text.tag_config("system", foreground="#666666", font=("Segoe UI", 9, "italic"))
-        self.chat_text.tag_config("warning", foreground="#c00000", font=("Segoe UI", 9, "bold"))
-        paned.add(chat_pane, weight=1)
+        chat_pane = tk.Frame(paned, background=t.bg_panel)
+        ttk.Label(chat_pane, text="Conversation", style="SectionTitle.TLabel",
+                  padding=(10, 8, 10, 4)).pack(anchor="w")
+        self._build_bubble_panel(chat_pane)
+        paned.add(chat_pane, weight=3)
 
-        wire_pane = ttk.Frame(paned)
+        wire_pane = tk.Frame(paned, background=t.bg_panel_alt)
         ttk.Label(wire_pane, text="Wire Log (what actually crosses the network)",
-                  font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        self.wire_text = tk.Text(wire_pane, wrap="word", state="disabled", height=20,
-                                  font=("Consolas", 9), background="#0f1117", foreground="#d0d0d0")
-        self.wire_text.pack(side="top", fill="both", expand=True)
-        self.wire_text.tag_config("sent", foreground="#7fc7ff")
-        self.wire_text.tag_config("recv", foreground="#b6f27f")
-        self.wire_text.tag_config("warning", foreground="#ff5c5c", font=("Consolas", 9, "bold"))
-        self.wire_text.tag_config("info", foreground="#d0d0d0")
-        paned.add(wire_pane, weight=1)
+                  style="SectionTitle.TLabel", background=t.bg_panel_alt,
+                  padding=(10, 8, 10, 4)).pack(anchor="w")
+        self.wire_text = tk.Text(wire_pane, wrap="word", state="disabled",
+                                  font=(t.mono_font, 9), background=t.bg_panel_alt,
+                                  foreground=t.wire_info, insertbackground=t.fg_primary,
+                                  borderwidth=0, highlightthickness=0, padx=10, pady=6)
+        wire_scroll = ttk.Scrollbar(wire_pane, orient="vertical", command=self.wire_text.yview)
+        self.wire_text.configure(yscrollcommand=wire_scroll.set)
+        self.wire_text.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=(0, 6))
+        wire_scroll.pack(side="right", fill="y", pady=(0, 6))
+        self.wire_text.tag_config("sent", foreground=t.wire_sent)
+        self.wire_text.tag_config("recv", foreground=t.wire_recv)
+        self.wire_text.tag_config("warning", foreground=t.wire_warning,
+                                   font=(t.mono_font, 9, "bold"))
+        self.wire_text.tag_config("info", foreground=t.wire_info)
+        paned.add(wire_pane, weight=2)
 
         # -- entry + send --
-        entry_frame = ttk.Frame(frame, padding=(8, 0, 8, 8))
-        entry_frame.pack(side="bottom", fill="x")
+        entry_frame = tk.Frame(frame, background=t.bg_app, padx=10)
+        entry_frame.pack(side="bottom", fill="x", pady=(0, 10))
         self.message_var = tk.StringVar()
-        entry = ttk.Entry(entry_frame, textvariable=self.message_var)
-        entry.pack(side="left", fill="x", expand=True)
+        entry = ttk.Entry(entry_frame, textvariable=self.message_var, font=(t.ui_font, 11))
+        entry.pack(side="left", fill="x", expand=True, ipady=4)
         entry.bind("<Return>", lambda _e: self._on_send())
         self.send_button = ttk.Button(entry_frame, text="Send", command=self._on_send)
-        self.send_button.pack(side="left", padx=(6, 0))
+        self.send_button.pack(side="left", padx=(8, 0))
+
+    # --- WhatsApp-style bubble conversation panel -----------------------
+    #
+    # Implementation choice: a Canvas-drawn rounded rectangle behind each
+    # message, rather than a plain Frame/Label block. Tkinter's native
+    # widgets have no border-radius option at all, but Canvas.create_polygon
+    # with smooth=True over a rounded-rectangle point path gives genuinely
+    # curved corners for a modest amount of code (see _rounded_rect_points),
+    # which reads as a real "bubble" rather than a padded rectangle -- worth
+    # the extra complexity here specifically, since this panel is the one
+    # most visibly "the chat app" during a demo. Bubbles live inside a
+    # standard Tkinter scrollable-frame-on-a-canvas (the idiomatic pattern
+    # for scrollable widget lists, since ttk has no native one).
+
+    def _build_bubble_panel(self, parent):
+        t = self.theme
+        container = tk.Frame(parent, background=t.bg_panel)
+        container.pack(side="top", fill="both", expand=True, padx=(6, 0), pady=(0, 6))
+
+        self.bubble_canvas = tk.Canvas(container, background=t.bg_panel,
+                                        borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical",
+                                   command=self.bubble_canvas.yview)
+        self.bubble_list = tk.Frame(self.bubble_canvas, background=t.bg_panel)
+
+        self.bubble_list.bind(
+            "<Configure>",
+            lambda _e: self.bubble_canvas.configure(
+                scrollregion=self.bubble_canvas.bbox("all")),
+        )
+        self._bubble_window = self.bubble_canvas.create_window(
+            (0, 0), window=self.bubble_list, anchor="nw")
+        # Keep the inner frame's width matched to the canvas's width so rows
+        # (and therefore left/right alignment) resize correctly instead of
+        # staying pinned to whatever width they were first drawn at.
+        self.bubble_canvas.bind(
+            "<Configure>",
+            lambda e: self.bubble_canvas.itemconfigure(self._bubble_window, width=e.width),
+        )
+        self.bubble_canvas.configure(yscrollcommand=scrollbar.set)
+        self.bubble_canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Mouse wheel scrolling (Windows/macOS deltas differ; this covers both).
+        self.bubble_canvas.bind_all(
+            "<MouseWheel>",
+            lambda e: self.bubble_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
+        )
+
+    @staticmethod
+    def _rounded_rect_points(x1, y1, x2, y2, r):
+        r = min(r, (x2 - x1) / 2, (y2 - y1) / 2)
+        return [
+            x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+            x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+            x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+        ]
+
+    def _add_bubble(self, text, align, bg, fg, timestamp_str):
+        """align: 'e' (right, our own messages) or 'w' (left, peer's)."""
+        t = self.theme
+        row = tk.Frame(self.bubble_list, background=t.bg_panel)
+        row.pack(side="top", fill="x", pady=4, padx=10)
+
+        max_width = 420
+        pad_x, pad_y = 14, 10
+        font = (t.ui_font, 10)
+        time_font = (t.ui_font, 8)
+
+        canvas = tk.Canvas(row, background=t.bg_panel, borderwidth=0, highlightthickness=0)
+
+        # Pass 1: draw the text off-window to measure its wrapped bbox.
+        text_id = canvas.create_text(0, 0, text=text, font=font, fill=fg,
+                                      width=max_width, anchor="nw")
+        tx1, ty1, tx2, ty2 = canvas.bbox(text_id)
+        text_w, text_h = tx2 - tx1, ty2 - ty1
+        time_id = canvas.create_text(0, 0, text=timestamp_str, font=time_font,
+                                      fill=fg, anchor="nw")
+        time_w = canvas.bbox(time_id)[2] - canvas.bbox(time_id)[0]
+        canvas.delete(text_id)
+        canvas.delete(time_id)
+
+        bubble_w = max(text_w, time_w) + pad_x * 2
+        bubble_h = text_h + pad_y * 2 + 14  # + room for the timestamp line
+        canvas.configure(width=bubble_w, height=bubble_h)
+
+        points = self._rounded_rect_points(1, 1, bubble_w - 1, bubble_h - 1, 14)
+        canvas.create_polygon(points, smooth=True, fill=bg, outline=bg)
+        canvas.create_text(pad_x, pad_y, text=text, font=font, fill=fg,
+                            width=max_width, anchor="nw")
+        canvas.create_text(bubble_w - pad_x, bubble_h - pad_y + 2, text=timestamp_str,
+                            font=time_font, fill=fg, anchor="se")
+
+        canvas.pack(side="right" if align == "e" else "left")
+        self._scroll_bubbles_to_bottom()
+
+    def _add_system_notice(self, text, warning=False):
+        """System messages are centered, muted, and deliberately NOT styled
+        as a bubble from either side -- they're notices, not chat turns."""
+        t = self.theme
+        row = tk.Frame(self.bubble_list, background=t.bg_panel)
+        row.pack(side="top", fill="x", pady=6, padx=10)
+        color = t.fg_warning if warning else t.fg_secondary
+        weight = "bold" if warning else "normal"
+        label = tk.Label(row, text=text, background=t.bg_panel, foreground=color,
+                          font=(t.ui_font, 9, weight), wraplength=560, justify="center")
+        label.pack(anchor="center")
+        self._scroll_bubbles_to_bottom()
+
+    def _scroll_bubbles_to_bottom(self):
+        self.bubble_list.update_idletasks()
+        self.bubble_canvas.configure(scrollregion=self.bubble_canvas.bbox("all"))
+        self.bubble_canvas.yview_moveto(1.0)
 
     def _show_login_screen(self):
         self.chat_frame.pack_forget()
@@ -374,15 +617,14 @@ class ChatGUI(tk.Tk):
             return
 
         if kind == "auth_success":
-            self.header_var.set(f"Logged in as {data['username']}  --  chatting with {data['peer']}")
+            self.header_var.set(f"{data['username']}  ↔  {data['peer']}")
             if data.get("own_fingerprint"):
-                self._append_chat(f"[system] Your key fingerprint: {data['own_fingerprint']}",
-                                   "system")
+                self._add_system_notice(f"Your key fingerprint: {data['own_fingerprint']}")
             if not data.get("peer_key_found"):
-                self._append_chat(
-                    f"[system] Could not fetch {data['peer']}'s public key yet -- their "
-                    f"messages will be rejected until this client reconnects after they "
-                    f"register.", "warning")
+                self._add_system_notice(
+                    f"Could not fetch {data['peer']}'s public key yet -- their messages "
+                    f"will be rejected until this client reconnects after they register.",
+                    warning=True)
             self._show_chat_screen()
             return
 
@@ -410,14 +652,13 @@ class ChatGUI(tk.Tk):
         if kind == "handshake_established":
             self._append_wire(f"[handshake] session key established with {data['peer']} "
                                f"(ECDH, authenticated by RSA signature)", "info")
-            self._append_chat(f"[system] Secure session established with {data['peer']}.",
-                               "system")
+            self._add_system_notice(f"Secure session established with {data['peer']}.")
             return
 
         if kind == "handshake_aborted":
             msg = f"[handshake] ABORTED with {data['peer']}: {data['reason']}"
             self._append_wire(msg, "warning")
-            self._append_chat("[system] " + msg, "warning")
+            self._add_system_notice(msg, warning=True)
             return
 
         if kind == "peer_fingerprint":
@@ -427,40 +668,37 @@ class ChatGUI(tk.Tk):
             return
 
         if kind == "message_sent":
-            self._append_chat(f"me: {data['message']}", "me")
+            self._add_bubble(data["message"], "e", self.theme.bg_bubble_sent,
+                              self.theme.fg_on_sent, time.strftime("%H:%M"))
             return
 
         if kind == "message_queued":
-            self._append_chat(f"[system] Message queued until the secure session is ready: "
-                               f"{data['message']}", "system")
+            self._add_system_notice(
+                f"Message queued until the secure session is ready: {data['message']}")
             return
 
         if kind == "message_received":
-            self._append_chat(f"{data['sender']}: {data['message']}", "peer")
+            self._add_bubble(f"{data['sender']}\n{data['message']}", "w",
+                              self.theme.bg_bubble_recv, self.theme.fg_on_recv,
+                              time.strftime("%H:%M"))
             return
 
         if kind == "message_rejected":
-            msg = f"[!] REJECTED message from {data['sender']}: {data['detail']}"
-            self._append_chat(msg, "warning")
-            self._append_wire(msg, "warning")
+            msg = f"REJECTED message from {data['sender']}: {data['detail']}"
+            self._add_system_notice(msg, warning=True)
+            self._append_wire(f"[!] {msg}", "warning")
             return
 
         if kind == "system_message":
-            self._append_chat(f"[system] {data['text']}", "system")
+            self._add_system_notice(data["text"])
             return
 
         if kind == "disconnected":
             self.conn_status_var.set(f"Disconnected from server: {data.get('reason', '')}")
-            self._append_chat("[system] Disconnected from server.", "warning")
+            self._add_system_notice("Disconnected from server.", warning=True)
             return
 
-    # --- small text-widget helpers ---------------------------------------
-
-    def _append_chat(self, line, tag=None):
-        self.chat_text.config(state="normal")
-        self.chat_text.insert("end", line + "\n", (tag,) if tag else ())
-        self.chat_text.see("end")
-        self.chat_text.config(state="disabled")
+    # --- wire log helper ---------------------------------------------------
 
     def _append_wire(self, line, tag=None):
         timestamp = time.strftime("%H:%M:%S")
