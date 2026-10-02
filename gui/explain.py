@@ -95,3 +95,68 @@ def describe_rejection(kind, reason, detail=None):
         severity, prefix = ("warn", "Warning") if kind == "chain_warning" else ("bad", "Message blocked")
     return {**base, "headline": f"{prefix}: {base['title']}", "severity": severity,
             "detail": detail if detail else (reason if kind == "handshake_aborted" else None)}
+
+
+# --- "What just happened?" banners ------------------------------------------------------
+#
+# One or two plain sentences shown under the header when something important happens.
+# Triggered ONLY by events a real check or the real session produced; the wording describes
+# what that check does, it never decides the outcome.
+
+BANNER_TEXT = {
+    "session_established": (
+        "ok", "Keys were exchanged with ECDH and the exchange was signed with RSA. "
+              "The server never saw the key."),
+    "decryption_failed": (
+        "bad", "The relay changed one byte. AES-GCM's authentication tag no longer matched, "
+               "so the message was rejected."),
+    "replay_duplicate": (
+        "bad", "An old message was sent again. The duplicate nonce/timestamp check "
+               "rejected it."),
+    "stale_timestamp": (
+        "bad", "An old message arrived late. The timestamp freshness check rejected it."),
+    "signature_failed": (
+        "bad", "The sender's RSA signature did not verify, so the message was rejected as "
+               "possibly forged."),
+    "chain_broken": (
+        "bad", "The message does not link to the conversation so far. The hash chain "
+               "rejected it."),
+    "chain_gap": (
+        "warn", "A message is missing. The hash chain noticed the gap in the sequence."),
+    "handshake_signature": (
+        "bad", "Someone swapped the key during the handshake. The RSA signature check "
+               "failed, so no session was created."),
+    "handshake_other": (
+        "bad", "The key exchange could not complete, so no session was created."),
+    "evidence_exported": (
+        "ok", "A signed copy of this conversation was saved. Anyone can verify it offline."),
+}
+
+
+def banner_for(kind, data=None):
+    """The (severity, text) banner for an event, or None if the event is not newsworthy.
+
+    `kind`/`data` are a SecureChatClient event (handshake_established, message_rejected,
+    chain_warning, handshake_aborted, lab_attack_performed) or the window's own
+    "evidence_exported". Severity is one of "ok", "bad", "warn", "info"."""
+    data = data or {}
+    if kind == "handshake_established":
+        return BANNER_TEXT["session_established"]
+    if kind == "message_rejected":
+        reason = data.get("reason")
+        if reason in BANNER_TEXT:
+            return BANNER_TEXT[reason]
+        info = REJECTIONS.get(reason)
+        return ("bad", info["explain"]) if info else None
+    if kind == "chain_warning":
+        return BANNER_TEXT["chain_gap"]
+    if kind == "handshake_aborted":
+        verified = "did not verify" in (data.get("reason") or "").lower()
+        return BANNER_TEXT["handshake_signature" if verified else "handshake_other"]
+    if kind == "evidence_exported":
+        return BANNER_TEXT["evidence_exported"]
+    if kind == "lab_attack_performed":
+        peer = data.get("peer") or "your peer"
+        return ("info", f"The relay just carried out the attack ({data.get('detail')}). "
+                        f"Watch {peer}'s window: their own checks decide whether it is caught.")
+    return None

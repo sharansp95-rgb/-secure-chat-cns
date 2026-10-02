@@ -52,7 +52,7 @@ from crypto_engine.signatures import fingerprint  # noqa: E402
 from crypto_engine.signatures import generate_keypair as generate_rsa_keypair  # noqa: E402
 from crypto_engine.signatures import serialize_public_key  # noqa: E402
 from gui import widgets  # noqa: E402
-from gui.explain import describe_rejection  # noqa: E402
+from gui.explain import banner_for, describe_rejection  # noqa: E402
 from gui.theme import Theme  # noqa: E402
 
 POLL_INTERVAL_MS = 50
@@ -435,6 +435,7 @@ class ChatGUI(tk.Tk):
         self._last_date = None
         self._session_ready = False
         self._network_visible = True
+        self.explain_var = tk.BooleanVar(value=True)     # settings menu: "Explain events"
         self._tls_text = "TLS 1.3"
         self._peer_fingerprint = None
 
@@ -457,6 +458,14 @@ class ChatGUI(tk.Tk):
                                          command=self._toggle_network)
         for button in (self.lab_button, self.export_button, self.network_button):
             button.pack(side="right", padx=(t.sp("sm"), 0))
+        self.settings_button = ttk.Menubutton(row1, text="⚙", style="TMenubutton", width=2)
+        self.settings_menu = tk.Menu(self.settings_button, tearoff=0)
+        self.settings_menu.add_checkbutton(label="Explain events", variable=self.explain_var,
+                                           command=self._on_explain_toggled)
+        self.settings_menu.add_command(label="Show / hide network view",
+                                       command=self._toggle_network)
+        self.settings_button["menu"] = self.settings_menu
+        self.settings_button.pack(side="right", padx=(t.sp("sm"), 0))
 
         self.avatar = widgets.Avatar(row1, t, "?", size=t.sp(44))
         self.avatar.pack(side="left", padx=(0, t.sp("md")))
@@ -478,6 +487,12 @@ class ChatGUI(tk.Tk):
 
         self.chip_row = self.fp_strip = chips = tk.Frame(header, background=t.bg_panel)
         chips.pack(side="top", fill="x", pady=(t.sp("md"), 0))
+
+        # "What just happened?" banner: sits right under the header, empty until a real
+        # event of interest happens (see gui/explain.py: banner_for).
+        self.banner_holder = tk.Frame(frame, background=t.bg_app)
+        self.banner_holder.pack(side="top", fill="x")
+        self._banner = None
         self.chip_tls = widgets.Chip(chips, t, "TLS 1.3", "off")
         self.chip_e2e = widgets.Chip(chips, t, "End-to-end encrypted", "off")
         self.chip_signed = widgets.Chip(chips, t, "Signed", "off")
@@ -574,6 +589,50 @@ class ChatGUI(tk.Tk):
                 chip.set("bad")
         self._update_send_state()
 
+    # --- "What just happened?" banner ------------------------------------------------------
+
+    def _maybe_banner(self, kind, data):
+        """Show the plain-English banner for a real event, if the user wants explanations."""
+        if not self.explain_var.get():
+            return
+        banner = banner_for(kind, dict(data, peer=self.peer))
+        if banner:
+            self._show_banner(*banner)
+
+    def _show_banner(self, severity, text):
+        t = self.theme
+        self._dismiss_banner()
+        color = {"ok": t.success, "bad": t.danger, "warn": t.warning, "info": t.accent}[severity]
+        bg = {"ok": t.bg_success_soft, "bad": t.bg_danger_soft, "warn": t.bg_warning_soft,
+              "info": t.bg_accent_soft}[severity]
+        banner = tk.Frame(self.banner_holder, background=bg, highlightbackground=color,
+                          highlightcolor=color, highlightthickness=1)
+        banner.pack(fill="x", padx=t.sp("md"), pady=(t.sp("sm"), 0))
+        tk.Frame(banner, background=color, width=t.sp(4)).pack(side="left", fill="y")
+        close = tk.Label(banner, text="✕", background=bg, foreground=t.fg_secondary,
+                         font=t.font("body_bold"), cursor="pointinghand", padx=t.sp("md"))
+        close.pack(side="right", anchor="n")
+        close.bind("<Button-1>", lambda _e: self._dismiss_banner())
+        body = tk.Frame(banner, background=bg, padx=t.sp("md"), pady=t.sp("sm"))
+        body.pack(side="left", fill="x", expand=True)
+        tk.Label(body, text="WHAT JUST HAPPENED", background=bg, foreground=color,
+                 font=t.font("caption_bold"), anchor="w").pack(anchor="w")
+        label = tk.Label(body, text=text, background=bg, foreground=t.fg_primary,
+                         font=t.font("body"), justify="left", anchor="w",
+                         wraplength=max(self.winfo_width() - 160, 240))
+        label.pack(anchor="w", fill="x")
+        self._banner = (banner, label)
+        self.banner_label = label
+
+    def _dismiss_banner(self):
+        if self._banner is not None:
+            self._banner[0].destroy()
+            self._banner = None
+
+    def _on_explain_toggled(self):
+        if not self.explain_var.get():
+            self._dismiss_banner()
+
     def _fit_header(self):
         """On a narrow window drop the long status sentence (the chips already show the
         state) rather than letting the action buttons be squeezed out of the header."""
@@ -650,6 +709,8 @@ class ChatGUI(tk.Tk):
         self.bind_all("<MouseWheel>", self._on_mousewheel)
 
     def _on_bubble_canvas_resize(self, event):
+        if self._banner is not None:
+            self._banner[1].config(wraplength=max(self.winfo_width() - 160, 240))
         # Keep the inner frame as wide as the canvas so rows (and left/right alignment)
         # resize correctly, and re-wrap notices/cards so they are never clipped.
         self.bubble_canvas.itemconfigure(self._bubble_window, width=event.width)
@@ -1252,6 +1313,7 @@ class ChatGUI(tk.Tk):
             f"Evidence exported: {rel}\nVerify it independently with:\n"
             f"python tools/verify_transcript.py \"{rel}\"")
         self._append_wire(f"signed evidence file written: {rel}", "INFO")
+        self._maybe_banner("evidence_exported", {})
 
     # --- sending ---------------------------------------------------------
 
@@ -1286,6 +1348,13 @@ class ChatGUI(tk.Tk):
         self.after(POLL_INTERVAL_MS, self._poll_events)
 
     def _handle_event(self, kind, data):
+        self._handle_event_inner(kind, data)
+        if self._chat_ready and kind in ("handshake_established", "message_rejected",
+                                         "chain_warning", "handshake_aborted",
+                                         "lab_attack_performed"):
+            self._maybe_banner(kind, data)
+
+    def _handle_event_inner(self, kind, data):
         if kind == "tls_cert_fingerprint":
             self._append_wire(
                 f"trusting server cert fingerprint: {data['fingerprint']}", "TLS")
