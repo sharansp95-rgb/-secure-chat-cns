@@ -394,8 +394,12 @@ class ChatGUI(tk.Tk):
         self.paned = paned
 
         chat_pane = tk.Frame(paned, background=t.bg_panel)
-        ttk.Label(chat_pane, text="Conversation", style="SectionTitle.TLabel",
-                  padding=(10, 8, 10, 4)).pack(anchor="w")
+        chat_head = tk.Frame(chat_pane, background=t.bg_panel)
+        chat_head.pack(side="top", fill="x")
+        ttk.Label(chat_head, text="Conversation", style="SectionTitle.TLabel",
+                  padding=(10, 8, 10, 4)).pack(side="left")
+        ttk.Label(chat_head, text="click a message for its security receipt",
+                  style="Hint.TLabel").pack(side="right", padx=(0, 10), pady=(8, 4))
         self._build_bubble_panel(chat_pane)
         paned.add(chat_pane, weight=3)
 
@@ -532,7 +536,7 @@ class ChatGUI(tk.Tk):
             x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
         ]
 
-    def _add_bubble(self, text, align, bg, fg, timestamp_str, sender=None):
+    def _add_bubble(self, text, align, bg, fg, timestamp_str, sender=None, receipt=None):
         """align: 'e' (right, our own messages) or 'w' (left, peer's).
         `sender`, if given, is drawn as a small accent-colored name line."""
         t = self.theme
@@ -577,6 +581,10 @@ class ChatGUI(tk.Tk):
                             font=time_font, fill=t.fg_secondary if sender else fg,
                             anchor="se")
 
+        if receipt:
+            # Stage E: clicking a bubble opens its security receipt.
+            canvas.configure(cursor="pointinghand" if sys.platform == "darwin" else "hand2")
+            canvas.bind("<Button-1>", lambda _e, r=receipt: self._show_receipt(r))
         canvas.pack(side="right" if align == "e" else "left")
         self._scroll_bubbles_to_bottom()
 
@@ -711,6 +719,86 @@ class ChatGUI(tk.Tk):
             "own_fingerprint": own_fingerprint, "peer_key_found": peer_key_found,
         }))
 
+    # --- per-message security receipt (Stage E) -------------------------------
+    #
+    # Pure presentation: every value shown was already verified by
+    # SecureChatClient before the message was displayed; the client attaches
+    # them to the message_sent / message_received event as `receipt`.
+
+    def _show_receipt(self, receipt):
+        t = self.theme
+        win = tk.Toplevel(self)
+        win.title("Security receipt")
+        win.configure(background=t.bg_panel)
+        win.resizable(False, False)
+        win.transient(self)
+        win.bind("<Escape>", lambda _e: win.destroy())
+
+        body = tk.Frame(win, background=t.bg_panel, padx=22, pady=18)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+
+        def short(value, n=20):
+            return "-" if not value else (value if len(value) <= n else value[:n] + "…")
+
+        sent = receipt.get("direction") == "sent"
+        tk.Label(body, text="Security receipt", background=t.bg_panel,
+                 foreground=t.fg_primary,
+                 font=(t.ui_font, t.size(14), "bold")).grid(row=0, column=0, columnspan=2,
+                                                            sticky="w")
+        tk.Label(body, text=("Message you sent" if sent else "Message you received"),
+                 background=t.bg_panel, foreground=t.fg_secondary,
+                 font=(t.ui_font, t.size(9))).grid(row=1, column=0, columnspan=2,
+                                                   sticky="w", pady=(0, 14))
+
+        # (label, value, color, monospace)
+        sender_text = f"{receipt.get('sender')}  ({receipt.get('sender_fingerprint') or 'no fingerprint'})"
+        rows = [("Sender", sender_text, t.fg_primary, False)]
+        if sent:
+            rows.append(("Signature", "✔ signed with your private key (RSA-PSS / SHA-256)",
+                         t.fg_accent, False))
+            rows.append(("Encryption", "✔ AES-256-GCM, fresh nonce per message",
+                         t.fg_accent, False))
+            rows.append(("Sent at", time.strftime("%H:%M:%S", time.localtime(
+                receipt.get("timestamp", 0))), t.fg_primary, False))
+            rows.append(("Chain position", f"seq #{receipt.get('seq')}  (your direction)",
+                         t.fg_primary, False))
+            rows.append(("prev_hash (signed)", short(receipt.get("prev_hash")), t.fg_primary, True))
+        else:
+            rows.append(("AES-GCM tag", "✔ verified (not tampered with in transit)",
+                         t.fg_accent, False))
+            rows.append(("RSA signature", "✔ verified against the sender's public key",
+                         t.fg_accent, False))
+            rows.append(("Timestamp", f"✔ fresh  ({receipt.get('age_seconds', 0)} s old when received)",
+                         t.fg_accent, False))
+            if receipt.get("chain_link") == "gap":
+                rows.append(("Chain position", f"seq #{receipt.get('seq')}  ⚠ earlier message(s) "
+                             f"missing before this one", t.fg_warning, False))
+            else:
+                rows.append(("Chain position", f"seq #{receipt.get('seq')}  ✔ links to the "
+                             f"previous message", t.fg_accent, False))
+            rows.append(("prev_hash", short(receipt.get("prev_hash")), t.fg_primary, True))
+        rows.append(("Nonce", short(receipt.get("nonce")), t.fg_primary, True))
+        rows.append(("Record SHA-256", short(receipt.get("record_hash")), t.fg_primary, True))
+
+        for i, (label, value, color, mono) in enumerate(rows, start=2):
+            tk.Label(body, text=label, background=t.bg_panel, foreground=t.fg_secondary,
+                     font=(t.ui_font, t.size(10)), anchor="w").grid(
+                row=i, column=0, sticky="nw", padx=(0, 18), pady=3)
+            tk.Label(body, text=value, background=t.bg_panel, foreground=color,
+                     font=(t.mono_font if mono else t.ui_font, t.size(10)),
+                     anchor="w", justify="left", wraplength=360).grid(
+                row=i, column=1, sticky="w", pady=3)
+
+        ttk.Button(body, text="Close", command=win.destroy).grid(
+            row=len(rows) + 2, column=0, columnspan=2, sticky="e", pady=(16, 0))
+
+        win.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - win.winfo_width()) // 2
+        y = self.winfo_rooty() + 80
+        win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        return win
+
     # --- evidence export -----------------------------------------------------
 
     def _on_export_evidence(self):
@@ -832,7 +920,8 @@ class ChatGUI(tk.Tk):
 
         if kind == "message_sent":
             self._add_bubble(data["message"], "e", self.theme.bg_bubble_sent,
-                              self.theme.fg_on_sent, time.strftime("%H:%M"))
+                              self.theme.fg_on_sent, time.strftime("%H:%M"),
+                              receipt=data.get("receipt"))
             return
 
         if kind == "message_queued":
@@ -843,7 +932,8 @@ class ChatGUI(tk.Tk):
         if kind == "message_received":
             self._add_bubble(data["message"], "w",
                               self.theme.bg_bubble_recv, self.theme.fg_on_recv,
-                              time.strftime("%H:%M"), sender=data["sender"])
+                              time.strftime("%H:%M"), sender=data["sender"],
+                              receipt=data.get("receipt"))
             return
 
         if kind == "message_rejected":
