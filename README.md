@@ -9,7 +9,7 @@ to broker keys), derives a fresh AES-256-GCM session key, signs and encrypts eve
 message with it, wraps the whole client↔server connection in TLS, gates every
 connection behind a PBKDF2-hashed login, rejects replayed or tampered messages, detects
 a relay dropping or reordering messages via a hash-chained conversation log, and locks
-out repeated failed logins — all properties backed by 144 automated tests and five
+out repeated failed logins — all properties backed by 160 automated tests and five
 live attack-and-defense demo scripts, plus a Tkinter GUI whose "Wire Log" panel makes
 the cryptography visible during a demo instead of invisible, an opt-in **Attack Lab**
 that triggers those same attacks for real with one click, and a live **Security
@@ -51,6 +51,17 @@ checks catch it, and the **Security Dashboard** gives a continuously-updated vie
 every login failure, lockout, and detected attack across the whole server.
 
 ## Quick start (clean clone → working two-GUI demo)
+
+**On a Mac, one command:** double-click [`demo/start_demo.command`](demo/start_demo.command)
+in Finder (or run `demo/start_demo.sh` in a terminal). It stops any leftover server of
+ours, checks the TLS certificate, then opens clearly titled Terminal windows for the
+server (Attack Lab on), two chat windows and the security dashboard, and waits until
+the server is really accepting connections before launching them. Options:
+`--no-lab` (normal mode) and `--port N`. Stop everything again with
+`demo/stop_demo.sh`, which touches only this project's own processes (never macOS
+AirPlay, which also listens on port 5000).
+
+Or step by step:
 
 ```
 git clone <this repo's URL>
@@ -229,22 +240,26 @@ pip install -r requirements.txt
 pytest tests/ -v
 ```
 
-144 tests across 12 files (the first seven one per project phase): `test_aes_gcm.py`
+160 tests across 15 files (the first seven one per project phase): `test_aes_gcm.py`
 (encryption), `test_dh_exchange.py` (key exchange), `test_password_hash.py` (login),
 `test_signatures.py` (non-repudiation), `test_handshake_auth.py` (signed-handshake
 MITM fix), `test_replay_protection.py` (replay defenses), `test_tls_setup.py`
 (transport security), plus `test_hash_chain.py` (dropped/reordered-message detection),
 `test_evidence_export.py` (signed export + offline verifier, including tampered files),
 `test_attack_lab.py` (opt-in lab-mode relay attacks and their safety restrictions),
-`test_lockout.py` (login lockout + per-address rate limiting), and
+`test_lockout.py` (login lockout + per-address rate limiting),
 `test_security_events.py` (the security event log end to end, including the full
-lockout flow and that a locked attempt never runs PBKDF2).
+lockout flow and that a locked attempt never runs PBKDF2), `test_entrypoints.py`
+(the documented ways of starting the project, run as real scripts),
+`test_gui_layout.py` (header, input row, login card and dashboard fit their windows;
+skipped automatically without a display) and `test_reset_environment.py` (the reset
+script only ever kills our own `server.py`).
 
-A small minority of the TLS-over-localhost integration tests (mainly in
-`test_attack_lab.py`/`test_security_events.py`, which open several real TLS
-connections back to back) can occasionally time out under heavy machine load rather
-than fail on an actual assertion -- rerunning `pytest` resolves it; this is a known
-characteristic of this environment, not a logic bug.
+The server-based tests are deterministic: each starts its server on an OS-chosen port,
+waits on real conditions instead of sleeping, tears everything down afterwards, and
+gets its own lockout state, user store, key directory and event log, so no test touches
+your real `data/`. (An earlier intermittent timeout was traced to a real bug --
+sharing one TLS socket between threads -- fixed in `transport/locked_tls.py`.)
 
 ## How to run (detail)
 

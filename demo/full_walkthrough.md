@@ -20,6 +20,16 @@ counted in the demo time.
 
 Do this once, quietly, before anyone is watching.
 
+**Fastest way (macOS): double-click `demo/start_demo.command`** in Finder (or run
+`demo/start_demo.sh` in a terminal). It does 1.1–1.3 below **and** step 2 for you: it
+stops any leftover server of ours, checks the certificate (regenerating it only if it
+is missing or invalid), opens a titled Terminal window for the server (`--lab`), waits
+until the server is accepting connections, then opens two chat windows and the
+security dashboard. Check the server window shows the line in 1.2. Use `--no-lab` for
+normal mode or `--port N` for another port; stop everything with `demo/stop_demo.sh`.
+If you use it, skip to step 3 (the two login windows are already open). The manual
+steps follow, for reference or if you are not on a Mac.
+
 **1.1** Open a terminal in the project root and run the environment reset script —
 **recommended even if you think certs already exist**, since you'll likely be on a
 fresh or different machine for the actual presentation, where `certs/` won't exist at
@@ -29,8 +39,9 @@ all yet:
 python demo/reset_environment.py
 ```
 
-This reports (and asks before killing) anything already listening on the server's
-port, then (re)generates `certs/server.crt`/`server.key` and prints the fingerprint of
+This reports (and asks before killing) a leftover `server.py` still listening on the
+server's port — it never touches other programs, such as macOS's AirPlay Receiver,
+which also uses port 5000 — then (re)generates `certs/server.crt`/`server.key` and prints the fingerprint of
 the cert it just wrote. **Note that fingerprint down** — you'll confirm it matches the
 server's own startup line in the next step. (If you'd rather generate certs manually
 instead: `python certs/generate_certs.py`, skippable if `certs/server.crt` and
@@ -73,15 +84,16 @@ Drag it to a corner of the screen, visible but out of the way of the two chat wi
 you'll open next.
 
 **1.4** Quick sanity check (optional but recommended): run `pytest tests/ -v` once and
-confirm it ends with `144 passed` (very occasionally one of the real-TLS integration
-tests times out under load rather than fails on an actual assertion — see the main
-README's "Running the tests" section; just rerun `pytest` if that happens). This is
-not shown to the professor; it's your own confidence check that nothing is broken
-before you start.
+confirm it ends with `160 passed`. This is not shown to the professor; it's your own
+confidence check that nothing is broken before you start.
 
 ---
 
 ## 2. Launch two GUI clients — **~30 sec**
+
+> If you used `demo/start_demo.command` in step 1, the two chat windows and the dashboard
+> are already open — arranged top-left, top-right and bottom-left; click a window's title
+> bar to bring it forward — so skip to step 3.
 
 **2.1** Open a second terminal, at the project root, and run:
 
@@ -526,7 +538,7 @@ To verify a GUI export yourself instead (optional):
 > to end: a real GUI with a security receipt on every message, a real wire log
 > showing exactly what crosses the network, live attacks triggered from inside the
 > app and caught by specific, testable defenses, and a dashboard watching all of it —
-> all backed by 144 automated tests in our repo. Happy to answer questions or run any
+> all backed by 160 automated tests in our repo. Happy to answer questions or run any
 > of this again."
 
 ---
