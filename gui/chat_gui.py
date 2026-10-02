@@ -305,6 +305,21 @@ class ChatGUI(tk.Tk):
                                      command=self._open_attack_lab, state="disabled")
         self.lab_button.pack(side="right", padx=(0, 8), pady=(0, 10))
 
+        # The input row is packed BEFORE the expanding split pane on purpose:
+        # Tk gives space to widgets in packing order, so packing it afterwards
+        # let the pane take everything and clipped the message box and Send
+        # button whenever the window was short.
+        # -- entry + send --
+        entry_frame = tk.Frame(frame, background=t.bg_app, padx=10)
+        entry_frame.pack(side="bottom", fill="x", pady=(0, 10))
+        self.message_var = tk.StringVar()
+        self.message_entry = ttk.Entry(entry_frame, textvariable=self.message_var,
+                                        font=(t.ui_font, t.size(11)))
+        self.message_entry.pack(side="left", fill="x", expand=True, ipady=5)
+        self.message_entry.bind("<Return>", lambda _e: self._on_send())
+        self.send_button = ttk.Button(entry_frame, text="Send", command=self._on_send)
+        self.send_button.pack(side="left", padx=(8, 0))
+
         # -- split pane: bubble conversation (left) / wire log (right) --
         paned = ttk.Panedwindow(frame, orient="horizontal")
         paned.pack(side="top", fill="both", expand=True, padx=10, pady=10)
@@ -349,17 +364,6 @@ class ChatGUI(tk.Tk):
                                    font=(t.mono_font, t.size(9), "bold"))
         self.wire_text.tag_config("info", foreground=t.wire_info)
         paned.add(wire_pane, weight=2)
-
-        # -- entry + send --
-        entry_frame = tk.Frame(frame, background=t.bg_app, padx=10)
-        entry_frame.pack(side="bottom", fill="x", pady=(0, 10))
-        self.message_var = tk.StringVar()
-        self.message_entry = ttk.Entry(entry_frame, textvariable=self.message_var,
-                                        font=(t.ui_font, t.size(11)))
-        self.message_entry.pack(side="left", fill="x", expand=True, ipady=5)
-        self.message_entry.bind("<Return>", lambda _e: self._on_send())
-        self.send_button = ttk.Button(entry_frame, text="Send", command=self._on_send)
-        self.send_button.pack(side="left", padx=(8, 0))
 
     def _set_session_state(self, state, peer, detail=""):
         """Header status line + fingerprint strip colors. `state` is one of

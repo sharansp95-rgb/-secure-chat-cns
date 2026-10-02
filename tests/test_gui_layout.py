@@ -47,3 +47,17 @@ def test_action_buttons_are_actually_mapped_and_inside_the_window(app):
         assert button.winfo_ismapped()
         assert button.winfo_width() > 40, "button squeezed to (almost) nothing"
         assert button.winfo_rootx() - app.winfo_rootx() + button.winfo_width() <= width
+
+
+@pytest.mark.parametrize("size", ["1040x660", "780x480"])  # default and minimum
+def test_message_box_and_send_button_are_never_clipped(app, size):
+    """The input row used to be packed after the expanding split pane, so a
+    taller header (or a short window) clipped the message box and Send button."""
+    app.geometry(f"{size}+10000+10000")
+    app._show_chat_screen()
+    app.update()
+    bottom = app.winfo_rooty() + app.winfo_height()
+    for widget in (app.message_entry, app.send_button):
+        assert widget.winfo_ismapped()
+        assert widget.winfo_height() > 20, f"{widget} squeezed to {widget.winfo_height()}px"
+        assert widget.winfo_rooty() + widget.winfo_height() <= bottom, "runs off the window"
