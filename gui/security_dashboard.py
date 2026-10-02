@@ -218,9 +218,11 @@ class SecurityDashboard(tk.Tk):
             row.pack(fill="x", pady=4)
             tk.Label(row, text=username, background=t.bg_panel, foreground=t.fg_primary,
                      font=(t.ui_font, t.size(10), "bold")).pack(anchor="w")
+            # wraplength: this pane is narrow, and an unwrapped line was clipped
+            # at its right edge ("retry in 56s (lock...").
             tk.Label(row, text=f"locked -- retry in {remaining}s (lockout #{info['lock_level'] + 1})",
                      background=t.bg_panel, foreground=t.fg_warning,
-                     font=(t.mono_font, t.size(9))).pack(anchor="w")
+                     font=(t.mono_font, t.size(9)), wraplength=200, justify="left").pack(anchor="w")
 
 
 def main():

@@ -76,3 +76,27 @@ def test_dashboard_shows_a_short_relative_log_path():
         assert window.path_var.get() == "watching: logs/security_events.jsonl"
     finally:
         window.destroy()
+
+
+def test_dashboard_locked_account_text_wraps_instead_of_being_clipped(tmp_path):
+    """The 'locked -- retry in Ns (lockout #N)' line is longer than the narrow
+    Locked accounts pane and was clipped; it must wrap."""
+    import json
+    import time as _time
+    import gui.security_dashboard as dashboard
+    log = tmp_path / "events.jsonl"
+    log.write_text(json.dumps({"ts": _time.time(), "event": "account_locked",
+                               "username": "carol", "retry_after": 60, "lock_level": 1}) + "\n")
+    try:
+        window = dashboard.SecurityDashboard(log_path=str(log))
+    except tk.TclError as exc:
+        pytest.skip(f"no display available for Tk: {exc}")
+    try:
+        window.geometry("+10000+10000")
+        window.update()  # runs the first poll, which renders the locked account
+        labels = [w for row in window.locked_list.winfo_children() for w in row.winfo_children()
+                  if isinstance(w, tk.Label) and "retry in" in str(w.cget("text"))]
+        assert labels, "locked account was not rendered"
+        assert all(int(str(l.cget("wraplength"))) > 0 for l in labels)
+    finally:
+        window.destroy()
