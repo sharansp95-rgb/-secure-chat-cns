@@ -1,11 +1,18 @@
 # Wireshark capture instructions
 
 **Note on this artifact:** `demo/capture_normal_session.pcapng` (committed alongside
-this file) is a real capture recorded on a teammate's own machine, since
-Wireshark/`tshark` wasn't available in the sandboxed environment this project was
-originally *built* in. This file gives the exact, copy-pasteable steps used to produce
-it, so you can reproduce it yourself (e.g. a longer or different capture for the
-report) rather than relying only on the one already committed here.
+this file) is a real capture of one complete session on port 5000, recorded from the
+very first packet: two TLS 1.3 handshakes (alice's and bob's connections), both
+registrations, the signed ECDH handshake, and four chat messages. The capture
+must start *before* the clients connect; otherwise the TLS handshake is missed and
+only `Application Data` appears. This file gives the exact, copy-pasteable steps
+used to produce it, so you can reproduce it yourself (e.g. a longer or different
+capture for the report).
+
+**If the Protocol column shows `RSL` instead of `TLS`:** port 5000 is registered to a
+GSM protocol called RSL, so Wireshark guesses wrong. Right-click any packet →
+**Decode As…** → set **Current** to `TLS` → **Save** → **OK**. (`tshark` equivalent:
+add `-d tcp.port==5000,tls`.)
 
 ## What you're capturing
 
@@ -54,9 +61,13 @@ before Phase 6, *is* the evidence — see "What to point out" below.
 
 ## What to point out in the capture (for your report / live demo)
 
-- The very first packets are a **TLS handshake** (`Client Hello`, `Server Hello`,
-  `Certificate`, `Finished`, ...) — click into the `Certificate` message and show the
-  `CN=localhost` self-signed cert from `certs/generate_certs.py`.
+- The very first packets are a **TLS 1.3 handshake**: a `Client Hello (SNI=localhost)`
+  followed by a `Server Hello` that selects **TLS 1.3** and
+  **TLS_AES_256_GCM_SHA384**. Note there is **no readable `Certificate` packet**:
+  TLS 1.3 encrypts the certificate along with everything else after the Server Hello
+  (it travels inside the `Application Data` records of that same packet). That
+  hidden certificate is itself worth pointing out; to show the cert's
+  `CN=localhost`, use `openssl x509 -in certs/server.crt -noout -subject` instead.
 - **Every packet after the handshake is `Application Data`** — Wireshark cannot parse
   it as JSON, HTTP, or anything else meaningful, because it's TLS ciphertext. Right-click
   → "Follow → TCP Stream" and show that the reassembled stream is unreadable binary, not

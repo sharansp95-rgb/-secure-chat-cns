@@ -187,20 +187,35 @@ Skip this step if short on time; it's a supplement to the live demo, not require
 **7.2** In the display filter bar at the top, type `tls` and press Enter to show only
 TLS-layer packets.
 
-**7.3** Click the packet whose **Protocol** column reads `TLSv1.2` or `TLSv1.3` and
-whose **Info** column reads `Client Hello`. In the packet-detail pane below, expand
-**Transport Layer Security → Handshake Protocol: Client Hello** to show the TLS
-handshake beginning the connection.
+> If the **Protocol** column shows `RSL` instead of `TLS`, Wireshark is guessing from
+> the port number (5000 is officially a GSM "RSL" port). Right-click any packet →
+> **Decode As…** → set **Current** to `TLS` → **Save** → **OK**. Do this once before
+> the demo; Wireshark remembers it.
 
-**7.4** Scroll down to find a packet whose **Info** column reads `Certificate`,
-click it, and expand **Transport Layer Security → ... → Certificate** to show the
-`CN=localhost` self-signed certificate from `certs/generate_certs.py`.
+The capture holds two connections (alice's and bob's), each starting with its own
+TLS handshake.
+
+**7.3** Click the first packet whose **Info** column reads `Client Hello (SNI=localhost)`.
+In the packet-detail pane below, expand **Transport Layer Security → Handshake
+Protocol: Client Hello** to show the TLS handshake beginning the connection, and point
+at **Extension: server_name → localhost**: the server name the client is asking for.
+
+**7.4** Click the next packet, whose **Info** column starts `Server Hello`. Expand
+**Transport Layer Security → … → Server Hello** and point at **Extension:
+supported_versions → TLS 1.3** and **Cipher Suite: TLS_AES_256_GCM_SHA384**.
+
+> **Say:** "The server's certificate is in this packet too, but TLS 1.3 encrypts it, so
+> even the certificate is hidden from an observer. Everything after this Server Hello
+> is encrypted."
 
 **7.5** Right-click any packet after the handshake completes (**Info** column reads
 `Application Data`) → **Follow → TCP Stream**. Point at the resulting hex/ASCII pane.
 
 **Expected:** the reassembled stream is unreadable binary — no `{"type": "login"...}`,
-no readable text anywhere.
+no readable text anywhere. To prove it, close that window, type
+`frame contains "alice"` into the display filter and press Enter: **zero packets**
+match, even though alice registered and chatted in this session. The same is true for
+`frame contains "password"` and for any of the message text.
 
 > **Say:** "This is a static capture of exactly the kind of session we just ran live.
 > Every one of these 'Application Data' packets is one of our JSON envelopes — but
