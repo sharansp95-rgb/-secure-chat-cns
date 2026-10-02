@@ -47,6 +47,7 @@ from client.client import (  # noqa: E402
     TLSSetupError,
     connect_tls,
 )
+from client.evidence import EvidenceError  # noqa: E402
 from crypto_engine.signatures import fingerprint  # noqa: E402
 from crypto_engine.signatures import generate_keypair as generate_rsa_keypair  # noqa: E402
 from crypto_engine.signatures import serialize_public_key  # noqa: E402
@@ -382,6 +383,11 @@ class ChatGUI(tk.Tk):
                                   font=(t.mono_font, t.size(12), "bold"))
         self.fp_label.pack()
 
+        # Stage B: write a signed evidence file for this session.
+        self.export_button = ttk.Button(top, text="Export Evidence",
+                                         command=self._on_export_evidence)
+        self.export_button.pack(side="right", padx=(0, 12))
+
         # -- split pane: bubble conversation (left) / wire log (right) --
         paned = ttk.Panedwindow(frame, orient="horizontal")
         paned.pack(side="top", fill="both", expand=True, padx=10, pady=10)
@@ -704,6 +710,25 @@ class ChatGUI(tk.Tk):
             "username": username, "peer": peer,
             "own_fingerprint": own_fingerprint, "peer_key_found": peer_key_found,
         }))
+
+    # --- evidence export -----------------------------------------------------
+
+    def _on_export_evidence(self):
+        if self.client is None:
+            return
+        try:
+            path = self.client.export_evidence()
+        except EvidenceError as exc:
+            self._add_system_notice(f"Cannot export evidence yet: {exc}", warning=True)
+            return
+        except OSError as exc:
+            self._add_system_notice(f"Could not write the evidence file: {exc}", warning=True)
+            return
+        rel = os.path.relpath(path, os.getcwd())
+        self._add_system_notice(
+            f"Evidence exported: {rel}\nVerify it independently with:\n"
+            f"python tools/verify_transcript.py \"{rel}\"")
+        self._append_wire(f"[evidence] signed evidence file written: {rel}", "info")
 
     # --- sending ---------------------------------------------------------
 

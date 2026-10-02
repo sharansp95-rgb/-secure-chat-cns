@@ -718,6 +718,12 @@ class SecureChatClient:
         self._emit("message_sent", peer=self.peer, message=text, timestamp=timestamp,
                    receipt=receipt)
 
+    def export_evidence(self, directory=None):
+        """Write a signed evidence file for this session (Stage B) and return
+        its path. See client/evidence.py for the structure."""
+        from client.evidence import DEFAULT_EXPORT_DIR, export_evidence
+        return export_evidence(self, directory or DEFAULT_EXPORT_DIR)
+
     def _own_fingerprint(self):
         if self.rsa_private_key is None:
             return None

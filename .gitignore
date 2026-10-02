@@ -19,3 +19,6 @@ data/
 certs/*.key
 certs/*.crt
 certs/*.pem
+
+# Signed evidence exports (Stage B) -- contain real conversation content.
+exports/
