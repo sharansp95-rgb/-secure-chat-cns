@@ -52,7 +52,7 @@ of the screen; you'll point at it in step 5 to show it never prints anyone's mes
 content.
 
 **1.3** Quick sanity check (optional but recommended): run `pytest tests/ -v` once and
-confirm it ends with `74 passed`. This is not shown to the professor; it's your own
+confirm it ends with `105 passed`. This is not shown to the professor; it's your own
 confidence check that nothing is broken before you start.
 
 ---
@@ -168,6 +168,17 @@ envelope lines in both wire logs.
 
 **6.3** Send one more each way (any text) so there are at least 2–3 message bubbles
 each direction visible before moving on.
+
+**6.4** In the **right** (bob) window, **click one of alice's gray bubbles**. A small
+dark popup titled **Security receipt** opens. Read out: the sender and their
+fingerprint, **AES-GCM tag ✔ verified**, **RSA signature ✔ verified**, **Timestamp ✔
+fresh (N s old)**, **Chain position: seq #1 ✔ links to the previous message**, and the
+truncated nonce and record SHA-256. Press Esc or **Close**. Then click one of bob's own
+teal bubbles to show the sent version ("✔ signed with your private key").
+
+> **Say:** "Every message carries its own receipt: not 'trust us, it's encrypted', but
+> exactly which checks this specific message passed. Everything on it was verified by
+> the client before the message was ever displayed."
 
 > **Say:** "Notice the Conversation panel reads like an ordinary chat app — that's the
 > point. Now look at the Wire Log: every message we just read in plain English exists
@@ -335,16 +346,97 @@ fingerprints printed at the bottom.
 
 ---
 
-## 11. Closing statement — **~30 sec**
+## 11. Run the dropped-message demo — **~60 sec**
+
+**11.1** Run:
+
+```
+python demo/run_drop_demo.py
+```
+
+**11.2** **Expected output** (middle of the run, then the result):
+
+```
+--- STEP 2: alice sends message #2 -- but the relay silently DROPS it ---
+    [MALICIOUS RELAY] silently dropped a valid chat message (it is never forwarded, and nobody is told).
+
+--- STEP 3: alice sends message #3 -- delivered; bob's chain check fires ---
+[!] WARNING: 1 message(s) missing before #3 (expected #2): possible deletion by the relay.
+...
+[PASS] Bob's client detected the gap: '1 message(s) missing ... possible deletion by the relay'.
+...
+DEMO 4 PASSED
+```
+
+Point at the `[MALICIOUS RELAY] silently dropped` line, then at the `WARNING: 1
+message(s) missing` line two steps later.
+
+> **Say:** "Encryption and signatures prove a message is real, but they can't tell you
+> about a message that never arrives. Here a compromised relay silently drops a
+> 'STOP, allergic reaction' order. Because every message carries a sequence number and
+> the hash of the previous one, inside the signed payload, the next message exposes the
+> hole immediately. WhatsApp or Signal wouldn't surface this; for a hospital or a
+> command chain, it's the difference that matters."
+
+---
+
+## 12. Export signed evidence and verify it independently — **~90 sec**
+
+**12.1** In either GUI window, click **Export Evidence** (top bar, left of the
+fingerprint strip). A notice appears in the Conversation panel:
+`Evidence exported: exports/evidence_<you>_<peer>_<time>.json`, with the exact verify
+command underneath. (The file is gitignored.)
+
+**12.2** Run the scripted version, which also demonstrates tampering:
+
+```
+python demo/run_evidence_demo.py
+```
+
+**12.3** **Expected output:** the verifier report for the genuine file ends with
+
+```
+RESULT: VALID ✔  every signature, chain link and the export signature checked out.
+```
+
+then, after the demo edits one word (`Approve` → `Reject`) in record #1 of a copy:
+
+```
+  ✘ #1 ...: signature -- RSA signature does NOT verify (message or chain fields were altered, or wrong key)
+  ✘ #1 ...: record hash -- record_hash does not match the record's content
+  ✘ #3 ...: chain -- prev_hash does not link to the previous record: ...
+  ✘ exporter signature by ... is INVALID -- the file was edited after export ...
+RESULT: INVALID ✘  4 check(s) failed; first failure: record #1 -- signature.
+...
+DEMO 5 PASSED
+```
+
+To verify a GUI export yourself instead (optional):
+`python tools/verify_transcript.py exports/<file>.json`. To pin a key you trust, add
+`--expect-fingerprint "XXXX XXXX XXXX XXXX"` (one of the fingerprints from step 5).
+
+> **Say:** "This is the opposite of WhatsApp's deniability. Every message is signed by
+> its author, so this file proves who said what, and the verifier is a separate
+> program that imports none of our chat code, so an auditor doesn't have to trust us,
+> either user, or the server. Change one word anywhere and it names the exact message
+> and the exact check that failed."
+
+---
+
+## 13. Closing statement — **~30 sec**
 
 > **Say:** "Going back to our Review 1 problem statement: we set out to build a chat
 > system where the relay server — which has to exist, to actually deliver messages —
 > is never a point where message content, passwords, or private keys are exposed, and
 > where standard network-level attacks — eavesdropping, tampering, replay, and
-> man-in-the-middle — are all defended against, not just encrypted-and-hoped. What
-> you've just seen is that working end to end: a real GUI, a real wire log showing
-> exactly what crosses the network, and three live attacks each caught by a specific,
-> testable defense — all backed by 74 automated tests in our repo. Happy to answer
+> man-in-the-middle — are all defended against, not just encrypted-and-hoped. And
+> beyond what WhatsApp or Signal set out to do, it's an auditable messenger: every
+> message is attributable to its author, a relay silently dropping a message is
+> detected, and a signed evidence file can be verified by a third party. What you've
+> just seen is that working end to end: a real GUI with a security receipt on every
+> message, a real wire log showing exactly what crosses the network, and four live
+> attacks each caught by a specific, testable defense — all backed by 105 automated
+> tests in our repo. Happy to answer
 > questions or run any of this again."
 
 ---
@@ -362,6 +454,8 @@ fingerprints printed at the bottom.
 | 8. Tamper demo | 1:00 |
 | 9. Replay demo | 1:00 |
 | 10. MITM handshake demo | 1:15 |
-| 11. Closing | 0:30 |
-| **Total (with step 7)** | **~9:00** |
-| **Total (without step 7, if short on time)** | **~8:00** |
+| 11. Dropped-message demo | 1:00 |
+| 12. Evidence export + verifier | 1:30 |
+| 13. Closing | 0:30 |
+| **Total (with step 7)** | **~11:30** |
+| **Total (without step 7, if short on time)** | **~10:30** |

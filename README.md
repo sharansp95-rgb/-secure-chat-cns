@@ -8,12 +8,35 @@ an RSA-signed ECDH (X25519) handshake between the two peers (never trusting the 
 to broker keys), derives a fresh AES-256-GCM session key, signs and encrypts every
 message with it, wraps the whole client↔server connection in TLS, gates every
 connection behind a PBKDF2-hashed login, and rejects replayed or tampered messages —
-all seven properties backed by 74 automated tests and three live attack-and-defense
+all properties backed by 105 automated tests and five live attack-and-defense
 demo scripts, plus a Tkinter GUI whose "Wire Log" panel makes the cryptography visible
 during a demo instead of invisible.
 
 PDF copies of this documentation are available in [`docs/pdf/`](docs/pdf/) for offline
 viewing or printing.
+
+## How this differs from WhatsApp/Signal
+
+WhatsApp and Signal are built to be **deniable**: after a conversation, nobody can
+prove to a third party who wrote what, and that is a feature for private
+messaging. This project makes the opposite, deliberate trade: an **auditable secure
+messenger** where every message is **provably attributable**, the conversation as a
+whole is **tamper-evident**, and the evidence can be **verified offline by someone who
+trusts neither user nor server**.
+
+| | WhatsApp / Signal | This project |
+|---|---|---|
+| **Who wrote it** | Deniable by design: no transferable proof of authorship | **Non-repudiation**: every message is signed with the sender's long-term RSA key; anyone holding the public key can verify it |
+| **Relay drops or reorders a message** | Each message is authentic on its own; conversation integrity isn't a surfaced, auditable guarantee | **Detected**: a per-sender hash chain (sequence number + hash of the previous message, inside the signed payload) flags "message(s) missing, possible deletion by the relay" |
+| **Evidence for a third party** | None: nothing exportable that proves anything | **Signed evidence file** plus a standalone verifier (`tools/verify_transcript.py`) that imports no client or server code |
+| **What the user can see** | Opaque; at most a safety number | **Security receipt** on every message (click a bubble) and a live **Wire Log** of what actually crosses the network |
+
+**Target use cases:** regulated environments where "who said what, and was anything
+removed?" must have a defensible answer: healthcare instructions (a dosage order, and
+proof that a later "stop" order was not silently dropped), financial approvals,
+legal and compliance communication, and command chains where orders must be
+attributable and complete. It is **not** the right tool where plausible deniability
+matters (e.g. whistleblowing or dissent): there, use Signal.
 
 ## Quick start (clean clone → working two-GUI demo)
 
@@ -33,7 +56,9 @@ both windows show a fingerprint at the top, type a message and click **Send** �
 appears in the **Conversation** panel on both sides, and its encrypted form appears in
 the **Wire Log** panel. For the exact, click-by-click version of this (what a teammate
 who's never run it before should do, live in front of the professor), see
-[`demo/full_walkthrough.md`](demo/full_walkthrough.md).
+[`demo/full_walkthrough.md`](demo/full_walkthrough.md). Click any message bubble
+to open its **security receipt**, and use **Export Evidence** (top bar) to write a
+signed evidence file you can check with `python tools/verify_transcript.py`.
 
 ## Architecture
 
@@ -59,6 +84,8 @@ test that exercises it (verified — see "Running the tests" below):
 | **Non-repudiation** | Every chat message is signed with the sender's long-term RSA private key; a message can't be forged as if signed by someone else's key | `crypto_engine/signatures.py` | `tests/test_signatures.py::test_wrong_public_key_fails_verification` |
 | **Key management** | A brand-new ECDH keypair is generated for every session (forward secrecy — compromising one session's key reveals nothing about any other); each identity's long-term RSA private key never leaves its own machine | `crypto_engine/dh_exchange.py`, `auth/keystore.py` | `tests/test_dh_exchange.py::test_fresh_keypairs_produce_different_session_keys` |
 | **Access control** | A connection is not admitted to the roster or allowed to route any handshake/chat envelope until it completes a successful PBKDF2-checked login | `auth/password_hash.py`, `server/server.py` (`_authenticate`) | `tests/test_tls_setup.py::test_tls_client_wrong_password_login_rejected` |
+| **Integrity of conversation** | A per-sender SHA-256 hash chain (`seq` + `prev_hash`, inside the signed and encrypted payload) lets the receiver detect a relay silently dropping, reordering or injecting messages | `crypto_engine/hash_chain.py`, chain check in `client/client.py` | `tests/test_hash_chain.py::test_real_pipeline_detects_relay_dropping_a_message` |
+| **Evidence** | Both directions of a session can be exported as one JSON file, signed by the exporter, and checked offline by an independent verifier (signatures, both hash chains, chain heads, export signature) | `client/evidence.py`, `tools/verify_transcript.py` | `tests/test_evidence_export.py::test_editing_one_message_makes_it_invalid_and_names_that_message` |
 
 Run any single one directly, e.g. `pytest tests/test_aes_gcm.py::test_ciphertext_is_not_plaintext -v`.
 
@@ -89,6 +116,17 @@ Said out loud, not buried — these are the honest edges of this project's scope
   actually prevent forgery (the receiver always verifies against the *real* sender's
   RSA key, not whatever the envelope claims), but this is worth knowing rather than
   assuming the server enforces it.
+- **Hash chains are per direction.** Each sender's messages are chained to each
+  other, so a dropped, reordered or edited message is caught. The *interleaving* of
+  alice's and bob's messages relative to each other is not cryptographically bound
+  (timestamps give only a rough order).
+- **Evidence proves consistency, not identity, unless you pin a fingerprint.** Anyone
+  can fabricate a complete, self-consistent evidence file with their own keys. An
+  auditor must obtain a participant's key fingerprint out of band and pass it with
+  `--expect-fingerprint`; the verifier then rejects any file that doesn't contain it.
+- **Non-repudiation is the opposite of deniability.** By design, a participant cannot
+  later deny having sent a signed message. That is the point for audit use cases, and
+  a drawback for anything needing deniability.
 - **Single relay server, no redundancy, no persistence beyond a local JSON file** —
   this is a course project demonstrating the cryptography, not a deployable service
   (no horizontal scaling, no database, no rate limiting, no replay-window
@@ -109,12 +147,16 @@ clear `[PASS]`/`[FAIL]` per check and an overall result:
 | `demo/run_tamper_demo.py` | A malicious/compromised relay flipping a ciphertext byte in transit cannot get a tampered message displayed — AES-GCM's tag catches it. |
 | `demo/run_replay_demo.py` | A relay resending a captured chat message a second time cannot get it displayed twice — the timestamp + duplicate-nonce tracking rejects the replay. |
 | `demo/run_mitm_handshake_demo.py` | A malicious relay substituting its own ECDH public key during the handshake is stopped by the signed handshake — no session key is ever derived, and the fingerprint that would result doesn't match either. |
+| `demo/run_drop_demo.py` | A relay silently dropping one valid message mid-conversation is caught: the receiver sees message #3 where #2 was expected and warns "possible deletion by the relay". |
+| `demo/run_evidence_demo.py` | A real conversation is exported as signed evidence and verified (VALID) by the independent verifier; then one word in one message of a copy is changed and the verifier reports INVALID, naming that message. |
 
 ```
 python certs/generate_certs.py   # once, if you haven't already
 python demo/run_tamper_demo.py
 python demo/run_replay_demo.py
 python demo/run_mitm_handshake_demo.py
+python demo/run_drop_demo.py
+python demo/run_evidence_demo.py
 ```
 
 See [`demo/README.md`](demo/README.md) for more detail, and
@@ -129,11 +171,12 @@ pip install -r requirements.txt
 pytest tests/ -v
 ```
 
-74 tests across 7 files, one per project phase: `test_aes_gcm.py` (encryption),
+105 tests across 9 files (the first seven one per project phase): `test_aes_gcm.py` (encryption),
 `test_dh_exchange.py` (key exchange), `test_password_hash.py` (login),
 `test_signatures.py` (non-repudiation), `test_handshake_auth.py` (signed-handshake
 MITM fix), `test_replay_protection.py` (replay defenses), `test_tls_setup.py`
-(transport security).
+(transport security), plus `test_hash_chain.py` (dropped/reordered-message detection) and
+`test_evidence_export.py` (signed export + offline verifier, including tampered files).
 
 ## How to run (detail)
 
@@ -241,7 +284,7 @@ envelope has a `"type"` field:
 | `handshake_response` | client ↔ client (via server) | `from`, `to`, `pubkey` (base64, 32 raw bytes), `handshake_sig` (base64, RSA-PSS signature over `pubkey`) |
 | `get_pubkey` | client → server | `username` (whose RSA public key to look up) |
 | `pubkey_result` | server → client | `username`, `public_key` (RSA PEM text or null), `success` |
-| `chat` | client ↔ client (via server) | `from`, `to`, `nonce`, `ciphertext`, `tag` (all base64); the plaintext AES-GCM decrypts to is itself `{"message", "timestamp", "signature"}` JSON, where `signature` covers `{message, timestamp}` together |
+| `chat` | client ↔ client (via server) | `from`, `to`, `nonce`, `ciphertext`, `tag` (all base64); the plaintext AES-GCM decrypts to is itself `{"message", "timestamp", "seq", "prev_hash", "signature"}` JSON, where `signature` covers the canonical record `{sender, recipient, seq, timestamp, message, prev_hash}` (see "How the hash chain works") |
 
 A connection must complete a successful `register` or `login` exchange before the
 server admits it to the roster or accepts any handshake/chat envelope from it. The
@@ -309,7 +352,7 @@ A captured, validly-encrypted, validly-signed chat envelope could otherwise be r
 later (or twice) and would still pass both AES-GCM and the RSA signature check, since
 neither says anything about *when* the message is being presented. Two independent
 defenses close this: first, a Unix timestamp is included in what gets **signed**
-(`chat_signable_bytes(message, timestamp)`) before encryption, so it travels tamper-
+(inside the canonical record built by `crypto_engine/hash_chain.canonical_record`) before encryption, so it travels tamper-
 evident — an attacker can't just bump the timestamp on a captured message to make it
 look fresh again, since that invalidates the signature. On receipt, a message is
 rejected if its timestamp is more than `REPLAY_WINDOW_SECONDS` (30s) old or more than
@@ -319,6 +362,54 @@ values per `aes_gcm.encrypt()` call, so a genuine resend from the sender would c
 *different* nonce) and rejects an exact repeat outright, even if it somehow fell inside
 the freshness window; old entries are pruned automatically once they're old enough that
 the timestamp check alone would catch them anyway. See `demo/run_replay_demo.py`.
+
+</details>
+
+<details>
+<summary>How the hash chain works (dropped / reordered message detection)</summary>
+
+Per-message AES-GCM and RSA signatures prove each message is authentic, but they can't
+notice a message that **never arrives**: a malicious relay can drop or reorder valid
+messages and every message that does arrive still verifies. So each sender keeps a
+chain over its own messages. Every outgoing message carries `seq` (1, 2, 3, ...) and
+`prev_hash` (the SHA-256 of that sender's previous canonical record; for the first
+message, a **genesis** value derived from both public ECDH keys of the handshake plus
+the sender's name, so no two sessions or directions share a start). Both fields sit
+inside the RSA-signed, AES-GCM-encrypted payload, so the relay can neither read nor
+alter them. The canonical record is
+`canonical_json({sender, recipient, seq, timestamp, message, prev_hash})` where
+`canonical_json` is sorted-key, no-whitespace, ASCII-escaped JSON; the signature and the
+record hash are both taken over exactly those bytes (`crypto_engine/hash_chain.py`).
+
+On receipt, after decrypt, signature, freshness and duplicate checks, the chain check
+runs: `seq` exactly as expected and `prev_hash` matching is **OK**; `seq` ahead of
+expected is a **gap** ("N message(s) missing, possible deletion by the relay": the
+authentic message is still shown and the chain resyncs, but a warning is raised);
+`seq` behind expected, or a wrong `prev_hash`, is **broken** ("possible reordering,
+replay or injection": the message is not shown). Gaps and rejections are recorded and
+exported with the evidence. See `demo/run_drop_demo.py`.
+
+</details>
+
+<details>
+<summary>How the signed evidence export and offline verifier work</summary>
+
+Each client keeps an in-memory transcript of every message that passed all checks
+(both directions, with the sender's signature), plus a separate list of rejected
+events that is never mixed into it. **Export Evidence** (header button, or
+`client.export_evidence()`) writes `exports/evidence_<you>_<peer>_<time>.json`
+(gitignored): participants with their RSA public keys and fingerprints, session
+start and end, the public signed handshake values, the ordered records, each side's
+final chain head, the rejected events, and the exporter's RSA signature over the
+canonical bytes of everything else.
+
+`python tools/verify_transcript.py exports/<file>.json` then checks, without importing
+any client or server code: fingerprints against keys, the handshake signatures,
+every message's signature, `record_hash` and chain link (recomputing both chains from
+genesis), the final chain heads, and the exporter's whole-file signature. It prints a
+per-message report and an overall **VALID** or **INVALID** that names the exact
+record and check that failed. `--expect-fingerprint "XXXX XXXX XXXX XXXX"` pins a key
+you trust out of band (see Known limitations). See `demo/run_evidence_demo.py`.
 
 </details>
 
