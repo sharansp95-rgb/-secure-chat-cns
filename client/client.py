@@ -345,6 +345,13 @@ class SecureChatClient:
         self.rejected_events = []
         self.session_started_at = None
 
+    # Stage D: event kinds that represent THIS client catching an attack --
+    # each one is both recorded locally (rejected_events, already used by
+    # the Stage B evidence export) and reported to the server as a small,
+    # metadata-only "security_alert" envelope, so the dashboard can show it
+    # too. See _send_security_alert for exactly what is (and is not) sent.
+    _SECURITY_ALERT_KINDS = {"message_rejected", "chain_warning", "handshake_aborted"}
+
     def _emit(self, kind, **data):
         """Notify the presentation layer of a structured event, if one is
         listening. Never allowed to raise into the caller -- a broken GUI
@@ -355,10 +362,40 @@ class SecureChatClient:
                 "sender": data.get("sender"), "reason": data.get("reason"),
                 "detail": data.get("detail"),
             })
+        if kind in self._SECURITY_ALERT_KINDS:
+            self._send_security_alert(kind, data)
         if self.on_event is None:
             return
         try:
             self.on_event(kind, data)
+        except Exception:
+            pass
+
+    def _send_security_alert(self, kind, data):
+        """Tell the server THIS client just caught an attack -- metadata
+        only (alert kind, the peer's username, a seq number if the check
+        that fired had one, and a timestamp): never plaintext, never a key,
+        never the ciphertext or signature bytes involved. Best-effort: if
+        sending fails (e.g. we're mid-disconnect), it's silently dropped,
+        same as any other envelope send.
+
+        Documented limitation: a MALICIOUS RELAY could simply drop this
+        envelope too, exactly like it could drop a chat message -- the
+        server seeing (or not seeing) this alert is not itself a security
+        guarantee. That is exactly why Stage B's evidence export exists:
+        each client also keeps its OWN local, signed record
+        (self.rejected_events, embedded in every evidence export) that
+        doesn't depend on the relay forwarding anything honestly.
+        """
+        try:
+            self.send_envelope({
+                "type": "security_alert",
+                "alert": kind,
+                "reason": data.get("reason"),
+                "peer": self.peer,
+                "seq": data.get("seq"),
+                "timestamp": int(time.time()),
+            })
         except Exception:
             pass
 
@@ -875,12 +912,12 @@ class SecureChatClient:
             print(f"\r[!] WARNING: message from {sender} rejected -- "
                   f"{verdict.detail}.\n> ", end="", flush=True)
             self._emit("message_rejected", sender=sender, reason="chain_broken",
-                       detail=verdict.detail)
+                       detail=verdict.detail, seq=verdict.got_seq)
             return
         if verdict.status == GAP:
             print(f"\r[!] WARNING: {verdict.detail}.\n> ", end="", flush=True)
             self._emit("chain_warning", sender=sender, reason="chain_gap",
-                       detail=verdict.detail)
+                       detail=verdict.detail, seq=verdict.got_seq)
 
         rec_hash = record_hash(signable)
         receipt = {

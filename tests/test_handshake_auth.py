@@ -101,8 +101,12 @@ def test_tampered_ecdh_pubkey_after_signing_is_rejected(identities):
 
     b._handle_handshake_init(tampered)
     assert b.session_key is None, "tampered handshake must not yield a session key"
-    # B must not have replied with a handshake_response to a rejected handshake.
-    assert b.sock.sent == []
+    # B must not have replied with a handshake_response to a rejected handshake
+    # (Stage D: it DOES send a metadata-only security_alert envelope instead,
+    # reporting the abort to the server for the dashboard -- see client.py's
+    # _send_security_alert -- but that is never a handshake_response).
+    sent_types = [json.loads(e.decode("utf-8"))["type"] for e in b.sock.sent]
+    assert "handshake_response" not in sent_types
 
 
 def test_tampered_handshake_response_is_rejected(identities):
@@ -141,7 +145,8 @@ def test_handshake_signed_with_wrong_key_is_rejected(identities):
     b._handle_handshake_init(forged_handshake_init)
 
     assert b.session_key is None, "impersonated handshake must be rejected"
-    assert b.sock.sent == []
+    sent_types = [json.loads(e.decode("utf-8"))["type"] for e in b.sock.sent]
+    assert "handshake_response" not in sent_types
 
 
 def test_handshake_with_no_signature_at_all_is_rejected(identities):

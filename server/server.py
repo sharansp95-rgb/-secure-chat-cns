@@ -66,6 +66,7 @@ from certs.generate_certs import cert_fingerprint_from_file  # noqa: E402
 from crypto_engine.dh_exchange import generate_keypair as generate_ecdh_keypair  # noqa: E402
 from crypto_engine.signatures import generate_keypair as generate_rsa_keypair  # noqa: E402
 from crypto_engine.signatures import sign  # noqa: E402
+from server.lockout import LockoutGuard  # noqa: E402
 from server.security_log import log_event  # noqa: E402
 
 DEFAULT_HOST = "127.0.0.1"
@@ -139,10 +140,14 @@ _LAB_ACTIONS = {"tamper_next", "replay_last", "drop_next", "mitm_next_handshake"
 class ChatServer:
     def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT,
                  certfile=DEFAULT_CERT_PATH, keyfile=DEFAULT_KEY_PATH,
-                 lab_mode=False):
+                 lab_mode=False, lockout=None):
         self.host = host
         self.port = port
         self.lab_mode = lab_mode
+        # Stage D: login lockout + per-address rate limiting (server/lockout.py).
+        # `lockout` is injectable so tests can use tiny thresholds/windows
+        # instead of the real 5-failures/5-minute defaults.
+        self.lockout = lockout if lockout is not None else LockoutGuard()
         # Built eagerly (not lazily in serve_forever) so a missing-certs
         # error surfaces immediately when the server is constructed, not
         # buried inside the accept loop.
@@ -383,6 +388,18 @@ class ChatServer:
                 self._send_system(conn, "[!] Please register or login first.")
                 continue
 
+            # Stage D: a per-source-address rate limit covers BOTH register
+            # and login attempts, independent of any one username -- this is
+            # what catches an attacker spreading guesses across many
+            # usernames, which the per-account lockout below alone would not.
+            if not self.lockout.check_address_rate(addr[0]):
+                self._send(conn, {
+                    "type": f"{etype}_result", "success": False,
+                    "reason": "too many requests from this address -- slow down and retry shortly",
+                })
+                log_event("address_rate_limited", from_addr=addr[0], attempted_type=etype)
+                continue
+
             username = envelope.get("username")
             password = envelope.get("password")
             public_key_pem = envelope.get("public_key")
@@ -393,6 +410,26 @@ class ChatServer:
                     "reason": "username and password are required",
                 })
                 continue
+
+            if etype == "login":
+                # Checked BEFORE verify_user() -- and therefore before any
+                # PBKDF2 work -- so repeatedly hammering an already-locked
+                # account cannot be used to burn CPU. See server/lockout.py's
+                # module docstring for the enumeration-safety trade-off this
+                # implies (the generic "invalid username or password" is
+                # used right up through the failure that triggers the lock;
+                # only an attempt against an ALREADY-locked account gets
+                # this more specific message).
+                lock_status = self.lockout.status(username)
+                if lock_status.locked:
+                    retry_after = int(lock_status.retry_after) + 1
+                    self._send(conn, {
+                        "type": "login_result", "success": False,
+                        "reason": f"account temporarily locked, retry in {retry_after}s",
+                    })
+                    log_event("lockout_rejected", username=username, from_addr=addr[0],
+                             retry_after=retry_after)
+                    continue
 
             with self._lock:
                 already_online = username in self.clients
@@ -416,20 +453,30 @@ class ChatServer:
                     "lab_mode": self.lab_mode,
                 })
                 print(f"[+] {username} registered from {addr[0]}:{addr[1]}")
+                log_event("user_registered", username=username, from_addr=addr[0])
                 return username
             else:  # login
                 if not verify_user(username, password):
+                    status = self.lockout.record_failure(username, addr=addr[0])
+                    log_event("failed_login", username=username, from_addr=addr[0])
+                    if status.newly_locked:
+                        print(f"[!] {username} locked out after repeated failed logins "
+                              f"(retry in {int(status.retry_after)}s)")
+                        log_event("account_locked", username=username, from_addr=addr[0],
+                                 retry_after=status.retry_after, lock_level=status.lock_level)
                     self._send(conn, {
                         "type": "login_result", "success": False,
                         "reason": "invalid username or password",
                     })
                     continue
+                self.lockout.record_success(username)
                 self._send(conn, {
                     "type": "login_result", "success": True,
                     "reason": "login successful",
                     "lab_mode": self.lab_mode,
                 })
                 print(f"[+] {username} logged in from {addr[0]}:{addr[1]}")
+                log_event("user_login", username=username, from_addr=addr[0])
                 return username
         return None
 
@@ -462,6 +509,8 @@ class ChatServer:
                     try:
                         envelope = json.loads(line)
                     except json.JSONDecodeError:
+                        log_event("malformed_envelope", from_user=name, from_addr=addr[0],
+                                 length=len(line))
                         continue
 
                     etype = envelope.get("type")
@@ -474,6 +523,19 @@ class ChatServer:
                         # genuinely unknown type) so a rejected attempt is
                         # always logged -- see _handle_lab_control.
                         self._handle_lab_control(conn, addr, name, envelope)
+                    elif etype == "security_alert":
+                        # Stage D: a client reporting that IT caught an
+                        # attack (GCM/signature/replay/chain/handshake). We
+                        # only log the metadata already in the envelope --
+                        # never re-derive or store anything sensitive -- and
+                        # never relay it anywhere; it's purely for the
+                        # security dashboard. See client.py's
+                        # _send_security_alert for exactly what it contains
+                        # and the "a malicious relay could drop this too"
+                        # limitation that's documented there.
+                        log_event("security_alert", reported_by=name, from_addr=addr[0],
+                                 alert=envelope.get("alert"), reason=envelope.get("reason"),
+                                 peer=envelope.get("peer"), seq=envelope.get("seq"))
                     # Unknown/unsupported types are ignored -- the server
                     # only understands routing, never message content.
         except (ConnectionResetError, ConnectionAbortedError, OSError):
@@ -495,6 +557,7 @@ class ChatServer:
             tls_conn = self.ssl_context.wrap_socket(conn, server_side=True)
         except (ssl.SSLError, OSError) as exc:
             print(f"[!] TLS handshake failed with {addr[0]}:{addr[1]} -- {exc}")
+            log_event("non_tls_connection", from_addr=addr[0], reason=str(exc))
             try:
                 conn.close()
             except OSError:

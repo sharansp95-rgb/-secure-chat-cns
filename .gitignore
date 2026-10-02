@@ -29,3 +29,6 @@ CNS_Review1_*.pptx
 
 # Structured security event log (server/security_log.py) -- real activity data.
 logs/
+
+# macOS Finder metadata.
+.DS_Store
