@@ -22,3 +22,7 @@ certs/*.pem
 
 # Signed evidence exports (Stage B) -- contain real conversation content.
 exports/
+
+# Course-submission files kept locally, never committed.
+CnsProj/
+CNS_Review1_*.pptx
