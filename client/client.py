@@ -110,6 +110,10 @@ from crypto_engine.signatures import serialize_public_key, sign, verify  # noqa:
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5000
+# How long connect_tls waits for the TCP connect + TLS handshake. Without
+# this, pointing at something that accepts TCP but never speaks TLS (e.g.
+# macOS's AirPlay Receiver, which also listens on port 5000) hangs forever.
+CONNECT_TIMEOUT_SECONDS = 10
 
 # Phase 7b replay-protection tuning. A message older than REPLAY_WINDOW_SECONDS
 # is rejected as stale/possibly replayed; one more than CLOCK_SKEW_SECONDS in
@@ -201,6 +205,7 @@ def connect_tls(host, port, cafile=DEFAULT_CAFILE, server_hostname="localhost",
         raise TLSSetupError(f"Could not load CA certificate from {cafile}: {exc}") from exc
 
     raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    raw_sock.settimeout(CONNECT_TIMEOUT_SECONDS)
     try:
         raw_sock.connect((host, port))
     except OSError as exc:
@@ -220,6 +225,15 @@ def connect_tls(host, port, cafile=DEFAULT_CAFILE, server_hostname="localhost",
     except ssl.SSLError as exc:
         raw_sock.close()
         raise TLSSetupError(f"TLS handshake failed: {exc}") from exc
+    except OSError as exc:  # includes socket.timeout
+        raw_sock.close()
+        raise TLSSetupError(
+            f"No TLS response from {host}:{port} within {CONNECT_TIMEOUT_SECONDS}s "
+            f"({exc or 'timed out'}). Is the chat server running on this port? "
+            f"(On macOS, port 5000 can be taken by AirPlay Receiver.)"
+        ) from exc
+    # Back to blocking mode: receive_loop waits indefinitely for messages.
+    tls_sock.settimeout(None)
     return tls_sock
 
 

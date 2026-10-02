@@ -141,8 +141,13 @@ def format_envelope_line(direction, envelope):
 # installed. _pick_font() checks tkinter.font.families() (only queryable
 # *after* a Tk root exists) and walks a priority list, returning the first
 # family that's actually present.
-_UI_FONT_PRIORITY = ["Poppins", "Segoe UI", "Helvetica", "Arial"]
-_MONO_FONT_PRIORITY = ["Consolas", "Cascadia Mono", "Courier New", "Courier"]
+_UI_FONT_PRIORITY = ["Poppins", "Segoe UI", "Helvetica Neue", "Helvetica", "Arial"]
+_MONO_FONT_PRIORITY = ["Consolas", "Cascadia Mono", "SF Mono", "Menlo", "Courier New", "Courier"]
+
+# Tk on macOS renders font points at 72 dpi, so a size that reads fine on
+# Windows (96 dpi) comes out roughly 25% smaller there. Theme.size() scales
+# every font size by this factor so the layout looks the same on both.
+_FONT_SCALE = 1.25 if sys.platform == "darwin" else 1.0
 
 
 def _pick_font(priority_list, families):
@@ -170,13 +175,17 @@ class Theme:
         self.bg_bubble_sent = "#128c7e"      # WhatsApp-teal, sent bubble
         self.bg_bubble_recv = "#2a2a2a"      # dark gray, received bubble
         self.bg_fingerprint = "#0b3d36"      # highlighted strip behind the fingerprint
+        self.bg_pending = "#3a2f0b"          # same strip while the handshake is pending
+        self.border = "#2a2a2a"
 
         # Foregrounds -- high contrast against the above.
         self.fg_primary = "#e8e8e8"
         self.fg_secondary = "#999999"
+        self.fg_hint = "#7a7a7a"
         self.fg_on_sent = "#eafff9"
         self.fg_on_recv = "#e8e8e8"
         self.fg_accent = "#25d366"          # WhatsApp-green accent (fingerprint, success)
+        self.fg_pending = "#f0b429"         # amber: handshake not done yet
         self.fg_warning = "#ff5c5c"
 
         # Wire log syntax colors (kept from the original design, re-checked
@@ -186,6 +195,10 @@ class Theme:
         self.wire_warning = "#ff5c5c"
         self.wire_info = "#c9c9c9"
 
+    @staticmethod
+    def size(points):
+        return round(points * _FONT_SCALE)
+
     def apply_ttk(self, style):
         """ttk theming covers Frame/Label/Entry/Button/Panedwindow/Scrollbar.
         It does NOT reach raw Tk widgets (Text, Canvas) -- those get bg/fg
@@ -194,25 +207,28 @@ class Theme:
         # honors custom colors well; the default Windows/aqua themes mostly
         # ignore background/foreground options on several widgets.
 
+        s = self.size
         style.configure(".", background=self.bg_app, foreground=self.fg_primary,
-                         font=(self.ui_font, 10))
+                         font=(self.ui_font, s(10)))
         style.configure("TFrame", background=self.bg_app)
         style.configure("Panel.TFrame", background=self.bg_panel)
         style.configure("TLabel", background=self.bg_app, foreground=self.fg_primary,
-                         font=(self.ui_font, 10))
+                         font=(self.ui_font, s(10)))
         style.configure("Panel.TLabel", background=self.bg_panel, foreground=self.fg_primary)
+        style.configure("PanelSecondary.TLabel", background=self.bg_panel,
+                         foreground=self.fg_secondary)
+        style.configure("Hint.TLabel", background=self.bg_panel, foreground=self.fg_hint,
+                         font=(self.ui_font, s(9)))
         style.configure("Secondary.TLabel", background=self.bg_app,
-                         foreground=self.fg_secondary, font=(self.ui_font, 9))
+                         foreground=self.fg_secondary, font=(self.ui_font, s(9)))
         style.configure("Title.TLabel", background=self.bg_app, foreground=self.fg_primary,
-                         font=(self.ui_font, 15, "bold"))
+                         font=(self.ui_font, s(15), "bold"))
         style.configure("Header.TLabel", background=self.bg_panel, foreground=self.fg_primary,
-                         font=(self.ui_font, 12, "bold"))
+                         font=(self.ui_font, s(12), "bold"))
         style.configure("SectionTitle.TLabel", background=self.bg_panel,
-                         foreground=self.fg_secondary, font=(self.ui_font, 10, "bold"))
+                         foreground=self.fg_secondary, font=(self.ui_font, s(10), "bold"))
         style.configure("Warning.TLabel", background=self.bg_app, foreground=self.fg_warning,
-                         font=(self.ui_font, 9, "bold"))
-        style.configure("Fingerprint.TLabel", background=self.bg_fingerprint,
-                         foreground=self.fg_accent, font=(self.mono_font, 13, "bold"))
+                         font=(self.ui_font, s(9), "bold"))
 
         style.configure("TEntry", fieldbackground=self.bg_input, foreground=self.fg_primary,
                          insertcolor=self.fg_primary, bordercolor=self.bg_input,
@@ -220,7 +236,7 @@ class Theme:
         style.map("TEntry", fieldbackground=[("readonly", self.bg_input)])
 
         style.configure("TButton", background=self.bg_bubble_sent, foreground="#ffffff",
-                         font=(self.ui_font, 10, "bold"), padding=(14, 8), borderwidth=0)
+                         font=(self.ui_font, s(10), "bold"), padding=(14, 8), borderwidth=0)
         style.map("TButton",
                   background=[("active", "#17a390"), ("disabled", "#3a3a3a")],
                   foreground=[("disabled", "#8a8a8a")])
@@ -270,36 +286,57 @@ class ChatGUI(tk.Tk):
                          highlightbackground="#2a2a2a", highlightthickness=1)
         card.place(relx=0.5, rely=0.5, anchor="center")
 
+        entry_font = (t.ui_font, t.size(11))
+        card.columnconfigure(0, weight=1)
+
         ttk.Label(card, text="Secure Chat", style="Header.TLabel",
-                  font=(t.ui_font, 20, "bold")).grid(
+                  font=(t.ui_font, t.size(20), "bold")).grid(
             row=0, column=0, columnspan=2, pady=(0, 4), sticky="w")
-        ttk.Label(card, text="Register a new identity or log in to an existing one.",
-                  style="Panel.TLabel", foreground=t.fg_secondary).grid(
+        ttk.Label(card, text="Register the first time you use a username, then Login after that.",
+                  style="PanelSecondary.TLabel").grid(
             row=1, column=0, columnspan=2, pady=(0, 20), sticky="w")
 
-        fields = [
-            ("Server host", "host_var", DEFAULT_HOST),
-            ("Server port", "port_var", str(DEFAULT_PORT)),
-            ("Username", "username_var", ""),
-            ("Peer username", "peer_var", ""),
-        ]
-        row = 2
-        for label, attr, default in fields:
-            ttk.Label(card, text=label, style="Panel.TLabel").grid(
-                row=row, column=0, sticky="w", pady=(0, 3))
-            var = tk.StringVar(value=default)
-            setattr(self, attr, var)
-            entry = ttk.Entry(card, textvariable=var, width=32, font=(t.ui_font, 10))
-            entry.grid(row=row + 1, column=0, columnspan=2, sticky="ew", pady=(0, 14))
-            row += 2
+        # Host and port share one row: they're set once and rarely touched.
+        ttk.Label(card, text="Server host", style="Panel.TLabel").grid(
+            row=2, column=0, sticky="w", pady=(0, 3))
+        ttk.Label(card, text="Server port", style="Panel.TLabel").grid(
+            row=2, column=1, sticky="w", padx=(10, 0), pady=(0, 3))
+        self.host_var = tk.StringVar(value=DEFAULT_HOST)
+        self.port_var = tk.StringVar(value=str(DEFAULT_PORT))
+        ttk.Entry(card, textvariable=self.host_var, width=24, font=entry_font).grid(
+            row=3, column=0, sticky="ew", pady=(0, 14), ipady=3)
+        ttk.Entry(card, textvariable=self.port_var, width=7, font=entry_font).grid(
+            row=3, column=1, sticky="ew", padx=(10, 0), pady=(0, 14), ipady=3)
 
-        ttk.Label(card, text="Password", style="Panel.TLabel").grid(
-            row=row, column=0, sticky="w", pady=(0, 3))
-        self.password_var = tk.StringVar()
-        ttk.Entry(card, textvariable=self.password_var, show="•", width=32,
-                  font=(t.ui_font, 10)).grid(
-            row=row + 1, column=0, columnspan=2, sticky="ew", pady=(0, 18))
-        row += 2
+        fields = [
+            # (label, attribute, show-char, hint shown under the field)
+            ("Username", "username_var", "", "Your own name in this chat."),
+            ("Peer username", "peer_var", "",
+             "Who you want to chat with: the other window's username."),
+            ("Password", "password_var", "•", None),
+        ]
+        row = 4
+        entries = []
+        for label, attr, show, hint in fields:
+            ttk.Label(card, text=label, style="Panel.TLabel").grid(
+                row=row, column=0, columnspan=2, sticky="w", pady=(0, 3))
+            var = tk.StringVar()
+            setattr(self, attr, var)
+            entry = ttk.Entry(card, textvariable=var, show=show, width=34, font=entry_font)
+            entry.grid(row=row + 1, column=0, columnspan=2, sticky="ew",
+                       pady=(0, 2 if hint else 18), ipady=3)
+            entries.append(entry)
+            row += 2
+            if hint:
+                ttk.Label(card, text=hint, style="Hint.TLabel").grid(
+                    row=row, column=0, columnspan=2, sticky="w", pady=(0, 12))
+                row += 1
+
+        # Enter moves to the next field; Enter in the password field logs in.
+        for current, nxt in zip(entries, entries[1:]):
+            current.bind("<Return>", lambda _e, n=nxt: n.focus_set())
+        entries[-1].bind("<Return>", lambda _e: self._start_auth("login"))
+        self.after(100, entries[0].focus_set)
 
         button_frame = tk.Frame(card, background=t.bg_panel)
         button_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 4))
@@ -311,36 +348,44 @@ class ChatGUI(tk.Tk):
         self.login_button.pack(side="left", expand=True, fill="x", padx=(6, 0))
         row += 1
 
-        self.login_status_var = tk.StringVar(value="")
-        ttk.Label(card, textvariable=self.login_status_var, style="Warning.TLabel",
-                  background=t.bg_panel, wraplength=340, justify="left").grid(
-            row=row, column=0, columnspan=2, pady=(12, 0), sticky="w")
+        # A plain tk.Label (not ttk) so its color can switch between neutral
+        # progress text and red errors -- see _set_login_status.
+        self.login_status = tk.Label(card, text="", background=t.bg_panel,
+                                      foreground=t.fg_secondary,
+                                      font=(t.ui_font, t.size(9), "bold"),
+                                      wraplength=380, justify="left")
+        self.login_status.grid(row=row, column=0, columnspan=2, pady=(12, 0), sticky="w")
+
+    def _set_login_status(self, text, error=False):
+        self.login_status.config(text=text, foreground=self.theme.fg_warning if error
+                                 else self.theme.fg_secondary)
 
     def _build_chat_screen(self):
         t = self.theme
         frame = tk.Frame(self, background=t.bg_app)
         self.chat_frame = frame
 
-        # -- top bar: identity + prominent fingerprint strip --
+        # -- top bar: identity + session status (left), fingerprint strip (right) --
         top = tk.Frame(frame, background=t.bg_panel, padx=16, pady=10)
         top.pack(side="top", fill="x")
+        identity = tk.Frame(top, background=t.bg_panel)
+        identity.pack(side="left", anchor="w")
         self.header_var = tk.StringVar(value="")
-        ttk.Label(top, textvariable=self.header_var, style="Header.TLabel").pack(
-            side="left", anchor="w")
+        ttk.Label(identity, textvariable=self.header_var, style="Header.TLabel").pack(anchor="w")
+        self.session_status = tk.Label(identity, text="", background=t.bg_panel,
+                                        font=(t.ui_font, t.size(9)))
+        self.session_status.pack(anchor="w", pady=(2, 0))
 
-        fp_strip = tk.Frame(top, background=t.bg_fingerprint, padx=12, pady=6)
-        fp_strip.pack(side="right")
-        self.fingerprint_var = tk.StringVar(value="Fingerprint: (handshake not complete yet)")
-        ttk.Label(fp_strip, textvariable=self.fingerprint_var, style="Fingerprint.TLabel",
-                  background=t.bg_fingerprint).pack()
-
-        self.conn_status_var = tk.StringVar(value="")
-        ttk.Label(frame, textvariable=self.conn_status_var, style="Warning.TLabel",
-                  padding=(16, 4)).pack(side="top", fill="x")
+        self.fp_strip = tk.Frame(top, background=t.bg_pending, padx=12, pady=6)
+        self.fp_strip.pack(side="right")
+        self.fp_label = tk.Label(self.fp_strip, text="", background=t.bg_pending,
+                                  font=(t.mono_font, t.size(12), "bold"))
+        self.fp_label.pack()
 
         # -- split pane: bubble conversation (left) / wire log (right) --
         paned = ttk.Panedwindow(frame, orient="horizontal")
         paned.pack(side="top", fill="both", expand=True, padx=10, pady=10)
+        self.paned = paned
 
         chat_pane = tk.Frame(paned, background=t.bg_panel)
         ttk.Label(chat_pane, text="Conversation", style="SectionTitle.TLabel",
@@ -349,11 +394,22 @@ class ChatGUI(tk.Tk):
         paned.add(chat_pane, weight=3)
 
         wire_pane = tk.Frame(paned, background=t.bg_panel_alt)
-        ttk.Label(wire_pane, text="Wire Log (what actually crosses the network)",
+        wire_head = tk.Frame(wire_pane, background=t.bg_panel_alt)
+        wire_head.pack(side="top", fill="x")
+        ttk.Label(wire_head, text="Wire Log (what actually crosses the network)",
                   style="SectionTitle.TLabel", background=t.bg_panel_alt,
-                  padding=(10, 8, 10, 4)).pack(anchor="w")
-        self.wire_text = tk.Text(wire_pane, wrap="word", state="disabled",
-                                  font=(t.mono_font, 9), background=t.bg_panel_alt,
+                  padding=(10, 8, 10, 4)).pack(side="left")
+        legend = tk.Frame(wire_head, background=t.bg_panel_alt)
+        legend.pack(side="right", padx=(0, 10), pady=(8, 4))
+        for text, color in (("--> sent", t.wire_sent), ("<-- received", t.wire_recv),
+                            ("rejected", t.wire_warning)):
+            tk.Label(legend, text=text, background=t.bg_panel_alt, foreground=color,
+                     font=(t.mono_font, t.size(8))).pack(side="left", padx=(10, 0))
+        # width=40 keeps the Text's *requested* width small, so the
+        # Panedwindow's 3:2 weights (not this widget's 80-char default)
+        # decide how the window's width is split between the two panes.
+        self.wire_text = tk.Text(wire_pane, wrap="word", state="disabled", width=40,
+                                  font=(t.mono_font, t.size(9)), background=t.bg_panel_alt,
                                   foreground=t.wire_info, insertbackground=t.fg_primary,
                                   borderwidth=0, highlightthickness=0, padx=10, pady=6)
         wire_scroll = ttk.Scrollbar(wire_pane, orient="vertical", command=self.wire_text.yview)
@@ -363,7 +419,7 @@ class ChatGUI(tk.Tk):
         self.wire_text.tag_config("sent", foreground=t.wire_sent)
         self.wire_text.tag_config("recv", foreground=t.wire_recv)
         self.wire_text.tag_config("warning", foreground=t.wire_warning,
-                                   font=(t.mono_font, 9, "bold"))
+                                   font=(t.mono_font, t.size(9), "bold"))
         self.wire_text.tag_config("info", foreground=t.wire_info)
         paned.add(wire_pane, weight=2)
 
@@ -371,11 +427,32 @@ class ChatGUI(tk.Tk):
         entry_frame = tk.Frame(frame, background=t.bg_app, padx=10)
         entry_frame.pack(side="bottom", fill="x", pady=(0, 10))
         self.message_var = tk.StringVar()
-        entry = ttk.Entry(entry_frame, textvariable=self.message_var, font=(t.ui_font, 11))
-        entry.pack(side="left", fill="x", expand=True, ipady=4)
-        entry.bind("<Return>", lambda _e: self._on_send())
+        self.message_entry = ttk.Entry(entry_frame, textvariable=self.message_var,
+                                        font=(t.ui_font, t.size(11)))
+        self.message_entry.pack(side="left", fill="x", expand=True, ipady=5)
+        self.message_entry.bind("<Return>", lambda _e: self._on_send())
         self.send_button = ttk.Button(entry_frame, text="Send", command=self._on_send)
         self.send_button.pack(side="left", padx=(8, 0))
+
+    def _set_session_state(self, state, peer, detail=""):
+        """Header status line + fingerprint strip colors. `state` is one of
+        "pending" (amber), "secure" (green), or "error" (red, shows `detail`)."""
+        t = self.theme
+        if state == "pending":
+            self.session_status.config(
+                text=f"●  Waiting for {peer} to come online and complete the handshake...",
+                foreground=t.fg_pending)
+            self.fp_strip.config(background=t.bg_pending)
+            self.fp_label.config(text=f"{peer}'s fingerprint: (handshake not complete yet)",
+                                 background=t.bg_pending, foreground=t.fg_pending)
+        elif state == "secure":
+            self.session_status.config(
+                text="●  End-to-end encrypted (ECDH + AES-256-GCM, RSA-signed)",
+                foreground=t.fg_accent)
+            self.fp_strip.config(background=t.bg_fingerprint)
+            self.fp_label.config(background=t.bg_fingerprint, foreground=t.fg_accent)
+        else:
+            self.session_status.config(text=f"●  {detail}", foreground=t.fg_warning)
 
     # --- WhatsApp-style bubble conversation panel -----------------------
     #
@@ -395,8 +472,11 @@ class ChatGUI(tk.Tk):
         container = tk.Frame(parent, background=t.bg_panel)
         container.pack(side="top", fill="both", expand=True, padx=(6, 0), pady=(0, 6))
 
-        self.bubble_canvas = tk.Canvas(container, background=t.bg_panel,
+        # width=360: a small requested width so the Panedwindow weights decide
+        # the split (see the matching note on wire_text).
+        self.bubble_canvas = tk.Canvas(container, background=t.bg_panel, width=360,
                                         borderwidth=0, highlightthickness=0)
+        self._notice_labels = []
         scrollbar = ttk.Scrollbar(container, orient="vertical",
                                    command=self.bubble_canvas.yview)
         self.bubble_list = tk.Frame(self.bubble_canvas, background=t.bg_panel)
@@ -408,22 +488,34 @@ class ChatGUI(tk.Tk):
         )
         self._bubble_window = self.bubble_canvas.create_window(
             (0, 0), window=self.bubble_list, anchor="nw")
-        # Keep the inner frame's width matched to the canvas's width so rows
-        # (and therefore left/right alignment) resize correctly instead of
-        # staying pinned to whatever width they were first drawn at.
-        self.bubble_canvas.bind(
-            "<Configure>",
-            lambda e: self.bubble_canvas.itemconfigure(self._bubble_window, width=e.width),
-        )
+        self.bubble_canvas.bind("<Configure>", self._on_bubble_canvas_resize)
         self.bubble_canvas.configure(yscrollcommand=scrollbar.set)
         self.bubble_canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        # Mouse wheel scrolling (Windows/macOS deltas differ; this covers both).
-        self.bubble_canvas.bind_all(
-            "<MouseWheel>",
-            lambda e: self.bubble_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
-        )
+        self.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    def _on_bubble_canvas_resize(self, event):
+        # Keep the inner frame's width matched to the canvas's width so rows
+        # (and therefore left/right alignment) resize correctly instead of
+        # staying pinned to whatever width they were first drawn at -- and
+        # re-wrap system notices to the new width so they never get clipped.
+        self.bubble_canvas.itemconfigure(self._bubble_window, width=event.width)
+        for label in self._notice_labels:
+            label.config(wraplength=max(event.width - 40, 120))
+
+    def _on_mousewheel(self, event):
+        """Scroll the conversation only when the pointer is over it (the wire
+        log's Text widget scrolls itself). Windows reports deltas in steps of
+        120; macOS reports small raw deltas, which the old `delta / 120`
+        rounded to 0 -- so take the sign, and the step count when available."""
+        widget = self.winfo_containing(event.x_root, event.y_root)
+        while widget is not None and widget is not self.bubble_canvas:
+            widget = widget.master
+        if widget is None or event.delta == 0:
+            return
+        units = max(1, abs(event.delta) // 120)
+        self.bubble_canvas.yview_scroll(-units if event.delta > 0 else units, "units")
 
     @staticmethod
     def _rounded_rect_points(x1, y1, x2, y2, r):
@@ -434,40 +526,50 @@ class ChatGUI(tk.Tk):
             x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
         ]
 
-    def _add_bubble(self, text, align, bg, fg, timestamp_str):
-        """align: 'e' (right, our own messages) or 'w' (left, peer's)."""
+    def _add_bubble(self, text, align, bg, fg, timestamp_str, sender=None):
+        """align: 'e' (right, our own messages) or 'w' (left, peer's).
+        `sender`, if given, is drawn as a small accent-colored name line."""
         t = self.theme
         row = tk.Frame(self.bubble_list, background=t.bg_panel)
         row.pack(side="top", fill="x", pady=4, padx=10)
 
-        max_width = 420
         pad_x, pad_y = 14, 10
-        font = (t.ui_font, 10)
-        time_font = (t.ui_font, 8)
+        # Cap bubbles at ~70% of the conversation pane so they never run
+        # past its edge when the pane is narrow.
+        pane_w = self.bubble_canvas.winfo_width()
+        max_width = max(160, min(420, int(pane_w * 0.7) - pad_x * 2))
+        font = (t.ui_font, t.size(10))
+        name_font = (t.ui_font, t.size(9), "bold")
+        time_font = (t.ui_font, t.size(8))
 
         canvas = tk.Canvas(row, background=t.bg_panel, borderwidth=0, highlightthickness=0)
 
-        # Pass 1: draw the text off-window to measure its wrapped bbox.
-        text_id = canvas.create_text(0, 0, text=text, font=font, fill=fg,
-                                      width=max_width, anchor="nw")
-        tx1, ty1, tx2, ty2 = canvas.bbox(text_id)
-        text_w, text_h = tx2 - tx1, ty2 - ty1
-        time_id = canvas.create_text(0, 0, text=timestamp_str, font=time_font,
-                                      fill=fg, anchor="nw")
-        time_w = canvas.bbox(time_id)[2] - canvas.bbox(time_id)[0]
-        canvas.delete(text_id)
-        canvas.delete(time_id)
+        def measure(**kw):
+            item = canvas.create_text(0, 0, anchor="nw", **kw)
+            x1, y1, x2, y2 = canvas.bbox(item)
+            canvas.delete(item)
+            return x2 - x1, y2 - y1
 
-        bubble_w = max(text_w, time_w) + pad_x * 2
-        bubble_h = text_h + pad_y * 2 + 14  # + room for the timestamp line
+        # Pass 1: measure everything off-window to size the bubble.
+        text_w, text_h = measure(text=text, font=font, width=max_width)
+        time_w, _ = measure(text=timestamp_str, font=time_font)
+        name_w, name_h = measure(text=sender, font=name_font) if sender else (0, 0)
+        name_gap = name_h + 2 if sender else 0
+
+        bubble_w = max(text_w, time_w, name_w) + pad_x * 2
+        bubble_h = name_gap + text_h + pad_y * 2 + 14  # + room for the timestamp line
         canvas.configure(width=bubble_w, height=bubble_h)
 
         points = self._rounded_rect_points(1, 1, bubble_w - 1, bubble_h - 1, 14)
         canvas.create_polygon(points, smooth=True, fill=bg, outline=bg)
-        canvas.create_text(pad_x, pad_y, text=text, font=font, fill=fg,
+        if sender:
+            canvas.create_text(pad_x, pad_y, text=sender, font=name_font,
+                                fill=t.fg_accent, anchor="nw")
+        canvas.create_text(pad_x, pad_y + name_gap, text=text, font=font, fill=fg,
                             width=max_width, anchor="nw")
         canvas.create_text(bubble_w - pad_x, bubble_h - pad_y + 2, text=timestamp_str,
-                            font=time_font, fill=fg, anchor="se")
+                            font=time_font, fill=t.fg_secondary if sender else fg,
+                            anchor="se")
 
         canvas.pack(side="right" if align == "e" else "left")
         self._scroll_bubbles_to_bottom()
@@ -480,9 +582,12 @@ class ChatGUI(tk.Tk):
         row.pack(side="top", fill="x", pady=6, padx=10)
         color = t.fg_warning if warning else t.fg_secondary
         weight = "bold" if warning else "normal"
+        wrap = max(self.bubble_canvas.winfo_width() - 40, 120)
         label = tk.Label(row, text=text, background=t.bg_panel, foreground=color,
-                          font=(t.ui_font, 9, weight), wraplength=560, justify="center")
+                          font=(t.ui_font, t.size(9), weight), wraplength=wrap,
+                          justify="center")
         label.pack(anchor="center")
+        self._notice_labels.append(label)
         self._scroll_bubbles_to_bottom()
 
     def _scroll_bubbles_to_bottom(self):
@@ -497,6 +602,14 @@ class ChatGUI(tk.Tk):
     def _show_chat_screen(self):
         self.login_frame.pack_forget()
         self.chat_frame.pack(fill="both", expand=True)
+        # Lay the chat screen out now, so the first notices/bubbles are
+        # sized against the real pane width rather than an unmapped 1px one.
+        # ttk.Panedwindow only applies pane weights on *resize*; the initial
+        # split comes from requested widths, so set the divider explicitly.
+        self.update_idletasks()
+        self.paned.sashpos(0, int(self.paned.winfo_width() * 0.55))
+        self.update_idletasks()
+        self.message_entry.focus_set()
 
     # --- login / register (background thread) --------------------------
 
@@ -505,19 +618,27 @@ class ChatGUI(tk.Tk):
         try:
             port = int(self.port_var.get().strip() or DEFAULT_PORT)
         except ValueError:
-            self.login_status_var.set("Port must be a number.")
+            self._set_login_status("Port must be a number.", error=True)
             return
         username = self.username_var.get().strip()
         peer = self.peer_var.get().strip()
         password = self.password_var.get()
 
         if not username or not peer or not password:
-            self.login_status_var.set("Username, peer, and password are all required.")
+            self._set_login_status("Username, peer username, and password are all required.",
+                                   error=True)
             return
+        if username == peer:
+            self._set_login_status("Peer username must be someone else -- the other "
+                                   "window's username.", error=True)
+            return
+        if str(self.register_button.cget("state")) == "disabled":
+            return  # an attempt is already in flight (e.g. Enter pressed twice)
 
         self.register_button.config(state="disabled")
         self.login_button.config(state="disabled")
-        self.login_status_var.set("Connecting...")
+        verb = "Registering" if mode == "register" else "Logging in"
+        self._set_login_status(f"{verb} as {username} via {host}:{port}...")
 
         threading.Thread(
             target=self._auth_worker, args=(mode, host, port, username, peer, password),
@@ -621,21 +742,26 @@ class ChatGUI(tk.Tk):
             return
 
         if kind == "auth_error":
-            self.login_status_var.set(f"Failed: {data.get('detail')}")
+            self._set_login_status(f"Failed: {data.get('detail')}", error=True)
             self.register_button.config(state="normal")
             self.login_button.config(state="normal")
             return
 
         if kind == "auth_success":
-            self.header_var.set(f"{data['username']}  ↔  {data['peer']}")
+            pair = f"{data['username']}  ↔  {data['peer']}"
+            self.header_var.set(pair)
+            self.title(f"Secure Chat (GUI) — {pair}")
+            self._set_session_state("pending", data["peer"])
+            self._show_chat_screen()
             if data.get("own_fingerprint"):
                 self._add_system_notice(f"Your key fingerprint: {data['own_fingerprint']}")
             if not data.get("peer_key_found"):
+                # Normal when this side logs in first: the key is fetched
+                # again automatically once the peer joins and starts the
+                # handshake (see the "handshake_waiting" event).
                 self._add_system_notice(
-                    f"Could not fetch {data['peer']}'s public key yet -- their messages "
-                    f"will be rejected until this client reconnects after they register.",
-                    warning=True)
-            self._show_chat_screen()
+                    f"{data['peer']} isn't registered or online yet -- the secure "
+                    f"session will start automatically when they log in.")
             return
 
         if kind == "envelope_sent":
@@ -663,17 +789,19 @@ class ChatGUI(tk.Tk):
             self._append_wire(f"[handshake] session key established with {data['peer']} "
                                f"(ECDH, authenticated by RSA signature)", "info")
             self._add_system_notice(f"Secure session established with {data['peer']}.")
+            self._set_session_state("secure", data["peer"])
             return
 
         if kind == "handshake_aborted":
             msg = f"[handshake] ABORTED with {data['peer']}: {data['reason']}"
             self._append_wire(msg, "warning")
             self._add_system_notice(msg, warning=True)
+            self._set_session_state("error", data["peer"], "Handshake aborted -- not secure")
             return
 
         if kind == "peer_fingerprint":
             fp = data["fingerprint"]
-            self.fingerprint_var.set(f"{data['peer']}'s fingerprint: {fp}")
+            self.fp_label.config(text=f"{data['peer']}'s fingerprint: {fp}")
             self._append_wire(f"[handshake] {data['peer']}'s RSA key fingerprint: {fp}", "info")
             return
 
@@ -688,9 +816,9 @@ class ChatGUI(tk.Tk):
             return
 
         if kind == "message_received":
-            self._add_bubble(f"{data['sender']}\n{data['message']}", "w",
+            self._add_bubble(data["message"], "w",
                               self.theme.bg_bubble_recv, self.theme.fg_on_recv,
-                              time.strftime("%H:%M"))
+                              time.strftime("%H:%M"), sender=data["sender"])
             return
 
         if kind == "message_rejected":
@@ -704,8 +832,12 @@ class ChatGUI(tk.Tk):
             return
 
         if kind == "disconnected":
-            self.conn_status_var.set(f"Disconnected from server: {data.get('reason', '')}")
+            reason = data.get("reason", "")
+            self._set_session_state("error", self.peer,
+                                    f"Disconnected from server ({reason}) -- restart to reconnect")
             self._add_system_notice("Disconnected from server.", warning=True)
+            self.send_button.config(state="disabled")
+            self.message_entry.config(state="disabled")
             return
 
     # --- wire log helper ---------------------------------------------------
