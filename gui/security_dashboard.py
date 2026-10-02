@@ -45,7 +45,7 @@ class SecurityDashboard(tk.Tk):
         self.log_path = log_path
         self.title("Security Dashboard")
         self.geometry("920x620")
-        self.minsize(640, 420)
+        self.minsize(640, 320)
 
         self.theme = Theme(self)
         self.configure(background=self.theme.bg_app)
@@ -58,6 +58,12 @@ class SecurityDashboard(tk.Tk):
         self._locked = {}              # username -> {"locked_until", "remaining", "lock_level"}
 
         self._build_layout()
+        # ttk.Panedwindow takes its initial split from requested widths, which
+        # left the Locked accounts pane too narrow for its own title and text.
+        # (Realize the window first: before it is mapped the pane is ~1px wide
+        # and Tk clamps the sash to that.)
+        self.update()
+        self.paned.sashpos(0, max(240, int(self.paned.winfo_width() * 0.3)))
         self._poll()
 
     # --- layout -----------------------------------------------------------
@@ -66,9 +72,11 @@ class SecurityDashboard(tk.Tk):
         t = self.theme
         top = tk.Frame(self, background=t.bg_lab, padx=16, pady=10)
         top.pack(side="top", fill="x")
+        # Title and watched-path are stacked (not side by side): next to each
+        # other they did not fit at the narrower widths the demo launcher uses.
         tk.Label(top, text="SECURITY DASHBOARD -- read-only, not connected to the server",
                  background=t.bg_lab, foreground="#ffffff",
-                 font=(t.ui_font, t.size(11), "bold")).pack(side="left")
+                 font=(t.ui_font, t.size(11), "bold")).pack(side="top", anchor="w")
         # Show the log path relative to the project when it lives inside it: the
         # absolute path is long enough to be clipped next to the title.
         shown = os.path.relpath(self.log_path, os.path.dirname(os.path.dirname(
@@ -77,7 +85,7 @@ class SecurityDashboard(tk.Tk):
             shown = self.log_path
         self.path_var = tk.StringVar(value=f"watching: {shown}")
         tk.Label(top, textvariable=self.path_var, background=t.bg_lab, foreground="#ffe8c8",
-                 font=(t.mono_font, t.size(8))).pack(side="right")
+                 font=(t.mono_font, t.size(8))).pack(side="top", anchor="w")
 
         body = tk.Frame(self, background=t.bg_app, padx=12, pady=10)
         body.pack(fill="both", expand=True)
@@ -102,9 +110,11 @@ class SecurityDashboard(tk.Tk):
         self.locked_list.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.locked_empty_label = tk.Label(self.locked_list, text="No accounts currently locked.",
                                            background=t.bg_panel, foreground=t.fg_secondary,
-                                           font=(t.ui_font, t.size(9)))
+                                           font=(t.ui_font, t.size(9)), wraplength=200,
+                                           justify="left")
         self.locked_empty_label.pack(anchor="w")
-        paned.add(locked_pane, weight=1)
+        paned.add(locked_pane, weight=0)  # fixed width; only the feed stretches
+        self.paned = paned
 
         feed_pane = tk.Frame(paned, background=t.bg_panel_alt)
         ttk.Label(feed_pane, text="Live event feed", style="SectionTitle.TLabel",
@@ -122,7 +132,7 @@ class SecurityDashboard(tk.Tk):
         self.feed_text.tag_config("warning", foreground=t.wire_warning,
                                   font=(t.mono_font, t.size(9), "bold"))
         self.feed_text.tag_config("info", foreground=t.wire_info)
-        paned.add(feed_pane, weight=2)
+        paned.add(feed_pane, weight=1)
 
     # --- polling: read whatever is new in the log, render it -------------
 
@@ -208,7 +218,8 @@ class SecurityDashboard(tk.Tk):
         if not self._locked:
             self.locked_empty_label = tk.Label(
                 self.locked_list, text="No accounts currently locked.",
-                background=t.bg_panel, foreground=t.fg_secondary, font=(t.ui_font, t.size(9)))
+                background=t.bg_panel, foreground=t.fg_secondary, font=(t.ui_font, t.size(9)),
+                wraplength=200, justify="left")
             self.locked_empty_label.pack(anchor="w")
             return
         for username, info in sorted(self._locked.items(),
@@ -229,8 +240,11 @@ def main():
     parser = argparse.ArgumentParser(description="Security dashboard -- tails "
                                                   "logs/security_events.jsonl")
     parser.add_argument("--log-path", default=DEFAULT_LOG_PATH)
+    parser.add_argument("--geometry", help="initial window size/position, e.g. 700x480+560+40")
     args = parser.parse_args()
     app = SecurityDashboard(log_path=args.log_path)
+    if args.geometry:
+        app.geometry(args.geometry)
     app.mainloop()
 
 

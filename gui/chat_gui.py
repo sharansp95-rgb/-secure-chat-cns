@@ -185,7 +185,7 @@ class ChatGUI(tk.Tk):
         outer = tk.Frame(self, background=t.bg_app)
         self.login_frame = outer
 
-        card = tk.Frame(outer, background=t.bg_panel, padx=36, pady=32,
+        card = tk.Frame(outer, background=t.bg_panel, padx=36, pady=16,
                          highlightbackground="#2a2a2a", highlightthickness=1)
         card.place(relx=0.5, rely=0.5, anchor="center")
 
@@ -193,11 +193,11 @@ class ChatGUI(tk.Tk):
         card.columnconfigure(0, weight=1)
 
         ttk.Label(card, text="Secure Chat", style="Header.TLabel",
-                  font=(t.ui_font, t.size(20), "bold")).grid(
-            row=0, column=0, columnspan=2, pady=(0, 4), sticky="w")
+                  font=(t.ui_font, t.size(18), "bold")).grid(
+            row=0, column=0, columnspan=2, pady=(0, 2), sticky="w")
         ttk.Label(card, text="Register the first time you use a username, then Login after that.",
                   style="PanelSecondary.TLabel").grid(
-            row=1, column=0, columnspan=2, pady=(0, 20), sticky="w")
+            row=1, column=0, columnspan=2, pady=(0, 10), sticky="w")
 
         # Host and port share one row: they're set once and rarely touched.
         ttk.Label(card, text="Server host", style="Panel.TLabel").grid(
@@ -207,9 +207,9 @@ class ChatGUI(tk.Tk):
         self.host_var = tk.StringVar(value=DEFAULT_HOST)
         self.port_var = tk.StringVar(value=str(DEFAULT_PORT))
         ttk.Entry(card, textvariable=self.host_var, width=24, font=entry_font).grid(
-            row=3, column=0, sticky="ew", pady=(0, 14), ipady=3)
+            row=3, column=0, sticky="ew", pady=(0, 8), ipady=2)
         ttk.Entry(card, textvariable=self.port_var, width=7, font=entry_font).grid(
-            row=3, column=1, sticky="ew", padx=(10, 0), pady=(0, 14), ipady=3)
+            row=3, column=1, sticky="ew", padx=(10, 0), pady=(0, 8), ipady=2)
 
         fields = [
             # (label, attribute, show-char, hint shown under the field)
@@ -227,12 +227,12 @@ class ChatGUI(tk.Tk):
             setattr(self, attr, var)
             entry = ttk.Entry(card, textvariable=var, show=show, width=34, font=entry_font)
             entry.grid(row=row + 1, column=0, columnspan=2, sticky="ew",
-                       pady=(0, 2 if hint else 18), ipady=3)
+                       pady=(0, 1 if hint else 12), ipady=2)
             entries.append(entry)
             row += 2
             if hint:
                 ttk.Label(card, text=hint, style="Hint.TLabel").grid(
-                    row=row, column=0, columnspan=2, sticky="w", pady=(0, 12))
+                    row=row, column=0, columnspan=2, sticky="w", pady=(0, 6))
                 row += 1
 
         # Enter moves to the next field; Enter in the password field logs in.
@@ -1010,7 +1010,17 @@ class ChatGUI(tk.Tk):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Secure Chat GUI client")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
+                        help="server port to pre-fill on the login screen "
+                             f"(default {DEFAULT_PORT})")
+    parser.add_argument("--geometry", help="initial window size/position, e.g. 780x560+10+40")
+    args = parser.parse_args()
     app = ChatGUI()
+    app.port_var.set(str(args.port))
+    if args.geometry:
+        app.geometry(args.geometry)
     app.mainloop()
 
 

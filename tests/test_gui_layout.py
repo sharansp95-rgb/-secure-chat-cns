@@ -100,3 +100,34 @@ def test_dashboard_locked_account_text_wraps_instead_of_being_clipped(tmp_path):
         assert all(int(str(l.cget("wraplength"))) > 0 for l in labels)
     finally:
         window.destroy()
+
+
+def test_dashboard_header_and_locked_pane_fit_at_the_launcher_width():
+    """At 700px wide (what demo/start_demo.sh uses) the dashboard header showed
+    "/securit" and the Locked accounts pane showed "Locked acco" / "ounts
+    currently": both must fit."""
+    import gui.security_dashboard as dashboard
+    try:
+        window = dashboard.SecurityDashboard()  # default log path: shown relative to the project
+    except tk.TclError as exc:
+        pytest.skip(f"no display available for Tk: {exc}")
+    try:
+        window.geometry("700x430+10000+10000")
+        window.update()
+        header = window.path_var and [w for w in window.winfo_children()
+                                      if isinstance(w, tk.Frame)][0]
+        assert header.winfo_reqwidth() <= 700, "dashboard header is wider than the window"
+        assert window.paned.sashpos(0) >= 220, "Locked accounts pane is too narrow"
+        assert window.locked_empty_label.winfo_reqwidth() <= window.paned.sashpos(0)
+    finally:
+        window.destroy()
+
+
+def test_login_card_fits_in_a_short_window(app):
+    """The login card (about 590px tall) was clipped top and bottom in
+    windows shorter than that, e.g. when several windows share one screen."""
+    app.geometry("780x540+10000+10000")
+    app.update()
+    card = app.login_frame.winfo_children()[0]
+    assert card.winfo_reqheight() <= 540, (
+        f"login card needs {card.winfo_reqheight()}px but the window is only 540px tall")

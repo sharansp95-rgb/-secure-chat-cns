@@ -25,7 +25,7 @@ def run_script(*args, timeout=30):
 
 
 @pytest.mark.parametrize("script", ["server/server.py", "client/client.py",
-                                    "gui/security_dashboard.py"])
+                                    "gui/security_dashboard.py", "gui/chat_gui.py"])
 def test_cli_entry_point_starts_in_script_mode(script):
     result = run_script(script, "--help")
     assert result.returncode == 0, result.stderr
