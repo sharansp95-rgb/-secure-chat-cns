@@ -226,7 +226,7 @@ class StepList(tk.Frame):
     """A vertical progress list: each step is pending, active, done, error or waiting.
     The login screen ticks these off as the REAL connection steps complete."""
 
-    GLYPH = {"pending": "○", "active": "◔", "done": "✓", "error": "✗", "waiting": "◔"}
+    GLYPH = {"pending": "○", "active": "◔", "done": "✓", "error": "✗", "waiting": "◑"}
 
     def __init__(self, parent, theme, background=None):
         bg = background or theme.bg_panel
@@ -270,7 +270,8 @@ class StepList(tk.Frame):
 def make_card(parent, theme, background=None, border=None, padx=None, pady=None):
     """A bordered panel (the one 'card' look used by login, receipt, Attack Lab...)."""
     return tk.Frame(parent, background=background or theme.bg_panel,
-                    highlightbackground=border or theme.border, highlightthickness=1,
+                    highlightbackground=border or theme.border, highlightcolor=border or theme.border,
+                    highlightthickness=1,
                     padx=theme.sp(padx or "lg"), pady=theme.sp(pady or "lg"))
 
 
@@ -306,3 +307,33 @@ def scrolled_frame(parent, theme, background=None):
     canvas.pack(side="left", fill="both", expand=True)
     bar.pack(side="right", fill="y")
     return outer, inner
+
+
+class Field(tk.Frame):
+    """A single-line input in a bordered box that turns teal on focus and red on error,
+    with an optional trailing control (e.g. the show/hide-password toggle)."""
+
+    def __init__(self, parent, theme, textvariable, show="", width=30, trailing=None):
+        super().__init__(parent, background=theme.bg_input, highlightthickness=1,
+                         highlightbackground=theme.border, highlightcolor=theme.accent)
+        self.theme, self.error = theme, False
+        self.entry = tk.Entry(self, textvariable=textvariable, show=show, width=width,
+                              borderwidth=0, highlightthickness=0, background=theme.bg_input,
+                              foreground=theme.fg_primary, insertbackground=theme.fg_primary,
+                              disabledbackground=theme.bg_input, font=theme.font("body"),
+                              selectbackground=theme.bg_accent, selectforeground="#ffffff")
+        self.entry.pack(side="left", fill="x", expand=True, padx=(theme.sp("md"), theme.sp("xs")),
+                        pady=theme.sp("sm"))
+        if trailing is not None:
+            trailing(self).pack(side="right", padx=(0, theme.sp("sm")))
+        self.entry.bind("<FocusIn>", lambda _e: self._paint(True))
+        self.entry.bind("<FocusOut>", lambda _e: self._paint(False))
+
+    def _paint(self, focused):
+        t = self.theme
+        self.configure(highlightbackground=t.danger if self.error else (t.accent if focused else t.border),
+                       highlightcolor=t.danger if self.error else t.accent)
+
+    def set_error(self, flag):
+        self.error = bool(flag)
+        self._paint(self.focus_get() is self.entry)

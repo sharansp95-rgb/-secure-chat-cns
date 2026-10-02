@@ -51,8 +51,15 @@ from client.evidence import EvidenceError  # noqa: E402
 from crypto_engine.signatures import fingerprint  # noqa: E402
 from crypto_engine.signatures import generate_keypair as generate_rsa_keypair  # noqa: E402
 from crypto_engine.signatures import serialize_public_key  # noqa: E402
+from gui import widgets  # noqa: E402
+from gui.theme import Theme  # noqa: E402
 
 POLL_INTERVAL_MS = 50
+TAGLINE = "Accountable end-to-end encrypted messaging for hospitals"
+HANDOFF_WAIT_MS = 2500        # how long the login screen waits for the handshake to finish
+HANDOFF_PEER_OFFLINE_MS = 1300
+LOGIN_STEP_KINDS = ("tls_connected", "tls_cert_fingerprint", "handshake_started",
+                    "handshake_established", "handshake_waiting")
 WIRE_LOG_TRUNCATE = 32
 
 # Envelope fields that are genuinely sensitive if shown in the clear in a
@@ -64,6 +71,24 @@ WIRE_LOG_TRUNCATE = 32
 # chat envelope's own fields (nonce/ciphertext/tag) never contain plaintext
 # to begin with.
 _REDACT_FIELDS = {"password"}
+
+
+def validate_login_form(host, port, username, peer, password):
+    """Inline validation for the login form. Returns {field: message} for every problem
+    (empty dict = OK); fields are "port", "username", "peer", "password"."""
+    errors = {}
+    port = str(port).strip()
+    if port and (not port.isdigit() or not 1 <= int(port) <= 65535):
+        errors["port"] = "Port must be a number from 1 to 65535."
+    if not username.strip():
+        errors["username"] = "Enter your username."
+    if not peer.strip():
+        errors["peer"] = "Enter who you want to chat with."
+    elif peer.strip() == username.strip():
+        errors["peer"] = "The peer must be someone else."
+    if not password:
+        errors["password"] = "Enter your password."
+    return errors
 
 
 def _truncate(s, n=WIRE_LOG_TRUNCATE):
@@ -143,12 +168,6 @@ def format_envelope_line(direction, envelope):
     return f"{direction} {etype}: {json.dumps(e)[:120]}", False
 
 
-# ============================================================================
-# Visual theme
-from gui.theme import Theme  # noqa: E402
-
-
-
 class ChatGUI(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -170,6 +189,13 @@ class ChatGUI(tk.Tk):
         self.sock = None
         self.username = None
         self.peer = None
+        self._auth_data = None       # auth_success payload, while the login screen waits
+        self._held_events = []       # events that arrived during that wait (replayed in order)
+        self._holding = False
+        self._chat_ready = False     # the chat screen has been shown (events are applied live)
+        self._handshake_done = False
+        self._tls_fingerprint = None
+        self._login_mode = "login"
 
         self._build_login_screen()
         self._build_chat_screen()
@@ -185,83 +211,198 @@ class ChatGUI(tk.Tk):
         outer = tk.Frame(self, background=t.bg_app)
         self.login_frame = outer
 
-        card = tk.Frame(outer, background=t.bg_panel, padx=36, pady=16,
-                         highlightbackground="#2a2a2a", highlightthickness=1)
+        card = widgets.make_card(outer, t, padx="xl", pady="lg")
         card.place(relx=0.5, rely=0.5, anchor="center")
-
-        entry_font = (t.ui_font, t.size(11))
         card.columnconfigure(0, weight=1)
 
-        ttk.Label(card, text="Secure Chat", style="Header.TLabel",
-                  font=(t.ui_font, t.size(18), "bold")).grid(
-            row=0, column=0, columnspan=2, pady=(0, 2), sticky="w")
-        ttk.Label(card, text="Register the first time you use a username, then Login after that.",
-                  style="PanelSecondary.TLabel").grid(
-            row=1, column=0, columnspan=2, pady=(0, 10), sticky="w")
+        # -- brand row: drawn shield + name + tagline --
+        brand = tk.Frame(card, background=t.bg_panel)
+        brand.grid(row=0, column=0, sticky="ew", pady=(0, t.sp("lg")))
+        widgets.Logo(brand, t, size=t.sp(56)).pack(side="left", padx=(0, t.sp("md")))
+        names = tk.Frame(brand, background=t.bg_panel)
+        names.pack(side="left", fill="x", expand=True)
+        tk.Label(names, text="Secure Chat", background=t.bg_panel, foreground=t.fg_primary,
+                 font=t.font("title"), anchor="w").pack(anchor="w")
+        tk.Label(names, text=TAGLINE, background=t.bg_panel, foreground=t.fg_secondary,
+                 font=t.font("caption"), wraplength=300, justify="left", anchor="w").pack(anchor="w")
 
-        # Host and port share one row: they're set once and rarely touched.
-        ttk.Label(card, text="Server host", style="Panel.TLabel").grid(
-            row=2, column=0, sticky="w", pady=(0, 3))
-        ttk.Label(card, text="Server port", style="Panel.TLabel").grid(
-            row=2, column=1, sticky="w", padx=(10, 0), pady=(0, 3))
         self.host_var = tk.StringVar(value=DEFAULT_HOST)
         self.port_var = tk.StringVar(value=str(DEFAULT_PORT))
-        ttk.Entry(card, textvariable=self.host_var, width=24, font=entry_font).grid(
-            row=3, column=0, sticky="ew", pady=(0, 8), ipady=2)
-        ttk.Entry(card, textvariable=self.port_var, width=7, font=entry_font).grid(
-            row=3, column=1, sticky="ew", padx=(10, 0), pady=(0, 8), ipady=2)
+        self.username_var = tk.StringVar()
+        self.peer_var = tk.StringVar()
+        self.password_var = tk.StringVar()
 
-        fields = [
-            # (label, attribute, show-char, hint shown under the field)
-            ("Username", "username_var", "", "Your own name in this chat."),
-            ("Peer username", "peer_var", "",
-             "Who you want to chat with: the other window's username."),
-            ("Password", "password_var", "•", None),
-        ]
-        row = 4
-        entries = []
-        for label, attr, show, hint in fields:
-            ttk.Label(card, text=label, style="Panel.TLabel").grid(
-                row=row, column=0, columnspan=2, sticky="w", pady=(0, 3))
-            var = tk.StringVar()
-            setattr(self, attr, var)
-            entry = ttk.Entry(card, textvariable=var, show=show, width=34, font=entry_font)
-            entry.grid(row=row + 1, column=0, columnspan=2, sticky="ew",
-                       pady=(0, 1 if hint else 12), ipady=2)
-            entries.append(entry)
-            row += 2
-            if hint:
-                ttk.Label(card, text=hint, style="Hint.TLabel").grid(
-                    row=row, column=0, columnspan=2, sticky="w", pady=(0, 6))
-                row += 1
+        self._fields, self._field_errors = {}, {}
+        self._form_groups = []     # widgets hidden while connecting (see _set_login_busy)
+        self._login_row = 1
 
-        # Enter moves to the next field; Enter in the password field logs in.
-        for current, nxt in zip(entries, entries[1:]):
-            current.bind("<Return>", lambda _e, n=nxt: n.focus_set())
-        entries[-1].bind("<Return>", lambda _e: self._start_auth("login"))
-        self.after(100, entries[0].focus_set)
+        def add_field(key, label, var, hint="", show="", trailing=None):
+            # The label row has one right-hand slot: the hint, replaced by a red inline
+            # error when validation fails (so errors never change the card's height).
+            row = tk.Frame(card, background=t.bg_panel)
+            row.grid(row=self._login_row, column=0, sticky="ew")
+            tk.Label(row, text=label, background=t.bg_panel, foreground=t.fg_primary,
+                     font=t.font("body_bold")).pack(side="left")
+            hint_lbl = tk.Label(row, text=hint, background=t.bg_panel, foreground=t.fg_hint,
+                                font=t.font("caption"))
+            hint_lbl.pack(side="right")
+            err = tk.Label(row, text="", background=t.bg_panel, foreground=t.danger,
+                           font=t.font("caption_bold"))
+            field = widgets.Field(card, t, var, show=show, width=30, trailing=trailing)
+            field.grid(row=self._login_row + 1, column=0, sticky="ew",
+                       pady=(t.sp("xs"), t.sp("sm")))
+            self._form_groups += [row, field]
+            err._hint = hint_lbl
+            self._fields[key], self._field_errors[key] = field, err
+            self._login_row += 2
+            return field
+
+        add_field("username", "Username", self.username_var, "your name in this chat")
+        add_field("peer", "Peer username", self.peer_var, "the other window's user")
+
+        def toggle(parent):
+            self._pw_toggle = tk.Label(parent, text="Show", background=t.bg_input,
+                                       foreground=t.accent, font=t.font("caption_bold"),
+                                       cursor="pointinghand")
+            self._pw_toggle.bind("<Button-1>", lambda _e: self._toggle_password())
+            return self._pw_toggle
+        add_field("password", "Password", self.password_var, show="•", trailing=toggle)
+
+        # Server settings stay out of the way (they are set once by the launcher) but are
+        # one click away, and open by themselves if the port is invalid.
+        self._server_open = False
+        self.server_toggle = tk.Label(card, text="", background=t.bg_panel, foreground=t.fg_hint,
+                                      font=t.font("caption"), cursor="pointinghand", anchor="w")
+        self.server_toggle.grid(row=self._login_row, column=0, sticky="w", pady=(t.sp("xs"), 0))
+        self.server_toggle.bind("<Button-1>", lambda _e: self._toggle_server_settings())
+        self._form_groups.append(self.server_toggle)
+        self._login_row += 1
+        self.server_box = tk.Frame(card, background=t.bg_panel)
+        self.server_box.grid(row=self._login_row, column=0, sticky="ew")
+        tk.Label(self.server_box, text="Host", background=t.bg_panel, foreground=t.fg_secondary,
+                 font=t.font("caption")).grid(row=0, column=0, sticky="w")
+        tk.Label(self.server_box, text="Port", background=t.bg_panel, foreground=t.fg_secondary,
+                 font=t.font("caption")).grid(row=0, column=1, sticky="w", padx=(t.sp("sm"), 0))
+        host_field = widgets.Field(self.server_box, t, self.host_var, width=18)
+        host_field.grid(row=1, column=0, sticky="ew")
+        port_field = widgets.Field(self.server_box, t, self.port_var, width=6)
+        port_field.grid(row=1, column=1, padx=(t.sp("sm"), 0))
+        self.server_box.columnconfigure(0, weight=1)
+        self._fields["port"] = port_field
+        port_err = tk.Label(self.server_box, text="", background=t.bg_panel,
+                            foreground=t.danger, font=t.font("caption_bold"), anchor="w")
+        port_err._hint = None
+        self._field_errors["port"] = port_err
+        self.server_box.grid_remove()
+        self._login_row += 1
+        self._refresh_server_summary()
+        for var in (self.host_var, self.port_var):
+            var.trace_add("write", lambda *_a: self._refresh_server_summary())
+
+        # Enter: move to the next empty field, or submit when everything is filled in.
+        order = [self._fields[k].entry for k in ("username", "peer", "password")]
+        for entry in order:
+            entry.bind("<Return>", lambda _e, cur=entry: self._on_login_enter(cur, order))
+        self.after(100, order[0].focus_set)
 
         button_frame = tk.Frame(card, background=t.bg_panel)
-        button_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 4))
-        self.register_button = ttk.Button(button_frame, text="Register",
+        button_frame.grid(row=self._login_row, column=0, sticky="ew", pady=(t.sp("md"), 0))
+        self.register_button = ttk.Button(button_frame, text="Register", style="Secondary.TButton",
                                            command=lambda: self._start_auth("register"))
-        self.register_button.pack(side="left", expand=True, fill="x", padx=(0, 6))
+        self.register_button.pack(side="left", expand=True, fill="x", padx=(0, t.sp("xs")))
         self.login_button = ttk.Button(button_frame, text="Login",
                                         command=lambda: self._start_auth("login"))
-        self.login_button.pack(side="left", expand=True, fill="x", padx=(6, 0))
-        row += 1
+        self.login_button.pack(side="left", expand=True, fill="x", padx=(t.sp("xs"), 0))
+        self._login_row += 1
+        first_time = tk.Label(card, text="First time? Register once; after that, Login.",
+                              background=t.bg_panel, foreground=t.fg_hint, font=t.font("caption"))
+        first_time.grid(row=self._login_row, column=0, sticky="w", pady=(t.sp("xs"), 0))
+        self._form_groups += [button_frame, first_time]
+        self._login_row += 1
 
-        # A plain tk.Label (not ttk) so its color can switch between neutral
-        # progress text and red errors -- see _set_login_status.
-        self.login_status = tk.Label(card, text="", background=t.bg_panel,
-                                      foreground=t.fg_secondary,
-                                      font=(t.ui_font, t.size(9), "bold"),
-                                      wraplength=380, justify="left")
-        self.login_status.grid(row=row, column=0, columnspan=2, pady=(12, 0), sticky="w")
+        # Step-by-step progress, ticked off as the REAL connection steps complete.
+        self.steps = widgets.StepList(card, t)
+        self.steps.grid(row=self._login_row, column=0, sticky="ew", pady=(t.sp("md"), 0))
+        self.steps.grid_remove()
+        self._login_row += 1
+        self.back_button = ttk.Button(card, text="Back", style="Secondary.TButton",
+                                      command=self._login_back)
+        self.back_button.grid(row=self._login_row, column=0, sticky="e", pady=(t.sp("sm"), 0))
+        self.back_button.grid_remove()
+        self._login_row += 1
+
+    # -- login form behaviour -------------------------------------------------------
+
+    def _toggle_password(self):
+        entry = self._fields["password"].entry
+        hidden = entry.cget("show") != ""
+        entry.config(show="" if hidden else "•")
+        self._pw_toggle.config(text="Hide" if hidden else "Show")
+
+    def _refresh_server_summary(self):
+        arrow = "▾" if self._server_open else "▸"
+        self.server_toggle.config(
+            text=f"{arrow} Server: {self.host_var.get().strip() or DEFAULT_HOST}:"
+                 f"{self.port_var.get().strip() or DEFAULT_PORT}")
+
+    def _toggle_server_settings(self, open_=None):
+        self._server_open = (not self._server_open) if open_ is None else open_
+        (self.server_box.grid if self._server_open else self.server_box.grid_remove)()
+        self._refresh_server_summary()
+
+    def _on_login_enter(self, current, order):
+        empty = [e for e in order if not e.get()]
+        if current is order[-1] or not empty:
+            self._start_auth("login")
+        else:
+            empty[0].focus_set()
+        return "break"
+
+    def _show_field_errors(self, errors):
+        for key, label in self._field_errors.items():
+            msg = errors.get(key)
+            self._fields[key].set_error(bool(msg))
+            hint = getattr(label, "_hint", None)
+            if msg:
+                label.config(text=msg)
+                if hint is not None:
+                    hint.pack_forget()
+                    label.pack(side="right")
+                else:
+                    label.grid(row=2, column=0, columnspan=2, sticky="w")
+            else:
+                if hint is not None:
+                    label.pack_forget()
+                    hint.pack(side="right")
+                else:
+                    label.grid_remove()
+        if "port" in errors:
+            self._toggle_server_settings(True)
+
+    def _set_login_busy(self, busy):
+        """While connecting, show only the brand and the progress list (the form is
+        hidden, so the card always fits, even in a short window)."""
+        for widget in self._form_groups:
+            (widget.grid_remove if busy else widget.grid)()
+        if busy:
+            self.server_box.grid_remove()
+            self.steps.grid()
+        else:
+            self._toggle_server_settings(self._server_open)
+            self.steps.grid_remove()
+            self.back_button.grid_remove()
+
+    def _login_back(self):
+        self._set_login_busy(False)
+        self.register_button.config(state="normal")
+        self.login_button.config(state="normal")
+        self._fields["password"].entry.focus_set()
 
     def _set_login_status(self, text, error=False):
-        self.login_status.config(text=text, foreground=self.theme.fg_warning if error
-                                 else self.theme.fg_secondary)
+        """Compatibility shim: show a one-off message as a failed/neutral progress line."""
+        self.steps.set_steps([text])
+        self.steps.grid()
+        self.steps.set(0, "error" if error else "active")
 
     def _build_chat_screen(self):
         t = self.theme
@@ -531,10 +672,12 @@ class ChatGUI(tk.Tk):
         self.bubble_canvas.yview_moveto(1.0)
 
     def _show_login_screen(self):
+        self._chat_ready = False
         self.chat_frame.pack_forget()
         self.login_frame.pack(fill="both", expand=True)
 
     def _show_chat_screen(self):
+        self._chat_ready = True
         self.login_frame.pack_forget()
         self.chat_frame.pack(fill="both", expand=True)
         # Lay the chat screen out now, so the first notices/bubbles are
@@ -549,31 +692,33 @@ class ChatGUI(tk.Tk):
     # --- login / register (background thread) --------------------------
 
     def _start_auth(self, mode):
+        if str(self.register_button.cget("state")) == "disabled":
+            return  # an attempt is already in flight (e.g. Enter pressed twice)
         host = self.host_var.get().strip() or DEFAULT_HOST
-        try:
-            port = int(self.port_var.get().strip() or DEFAULT_PORT)
-        except ValueError:
-            self._set_login_status("Port must be a number.", error=True)
+        errors = validate_login_form(host, self.port_var.get(), self.username_var.get(),
+                                     self.peer_var.get(), self.password_var.get())
+        self._show_field_errors(errors)
+        if errors:
             return
+        port = int(self.port_var.get().strip() or DEFAULT_PORT)
         username = self.username_var.get().strip()
         peer = self.peer_var.get().strip()
         password = self.password_var.get()
 
-        if not username or not peer or not password:
-            self._set_login_status("Username, peer username, and password are all required.",
-                                   error=True)
-            return
-        if username == peer:
-            self._set_login_status("Peer username must be someone else -- the other "
-                                   "window's username.", error=True)
-            return
-        if str(self.register_button.cget("state")) == "disabled":
-            return  # an attempt is already in flight (e.g. Enter pressed twice)
-
+        self._login_mode = mode
+        self._holding, self._held_events, self._auth_data = False, [], None
+        self._handshake_done, self._tls_fingerprint = False, None
         self.register_button.config(state="disabled")
         self.login_button.config(state="disabled")
-        verb = "Registering" if mode == "register" else "Logging in"
-        self._set_login_status(f"{verb} as {username} via {host}:{port}...")
+        self.steps.set_steps([
+            "Connecting over TLS 1.3",
+            "Verifying the server certificate",
+            "Registering your account" if mode == "register" else "Logging in",
+            f"Exchanging keys with {peer}",
+            "Verifying the handshake signature",
+        ])
+        self._set_login_busy(True)
+        self.steps.set(0, "active")
 
         threading.Thread(
             target=self._auth_worker, args=(mode, host, port, username, peer, password),
@@ -593,8 +738,15 @@ class ChatGUI(tk.Tk):
                 ),
             )
         except TLSSetupError as exc:
-            self.event_queue.put(("auth_error", {"detail": str(exc)}))
+            self.event_queue.put(("auth_error", {"detail": str(exc), "stage": "tls"}))
             return
+        # connect_tls only returns once the TLS handshake AND the certificate check
+        # succeeded; the negotiated protocol version is read straight off the socket.
+        try:
+            tls_version = sock.version()
+        except (AttributeError, OSError, ValueError):
+            tls_version = None
+        self.event_queue.put(("tls_connected", {"version": tls_version}))
 
         client = SecureChatClient(sock, username=username, peer=peer,
                                    event_callback=self._on_client_event)
@@ -611,7 +763,7 @@ class ChatGUI(tk.Tk):
         result = client.auth_results.get()
         if not result or not result.get("success"):
             reason = result.get("reason") if result else "connection lost"
-            self.event_queue.put(("auth_error", {"detail": reason}))
+            self.event_queue.put(("auth_error", {"detail": reason, "stage": "auth"}))
             try:
                 sock.close()
             except OSError:
@@ -641,6 +793,83 @@ class ChatGUI(tk.Tk):
             "username": username, "peer": peer, "lab_mode": client.lab_mode,
             "own_fingerprint": own_fingerprint, "peer_key_found": peer_key_found,
         }))
+
+    # --- login progress (ticked off by real events) ----------------------------------
+
+    def _login_step_event(self, kind, data):
+        """Update the progress list from a REAL event. Safe to call in any order: the
+        handshake can finish before auth_success is processed on the receiving side."""
+        s = self.steps
+        if kind == "tls_cert_fingerprint":
+            self._tls_fingerprint = data["fingerprint"]
+        elif kind == "tls_connected":
+            version = (data.get("version") or "TLSv1.3").replace("TLSv", "TLS ")
+            s.set(0, "done", f"Connected over {version}")
+            fp = self._tls_fingerprint
+            s.set(1, "done", "Server certificate verified"
+                  + (f" (fingerprint {fp})" if fp else ""))
+            s.set(2, "active")
+        elif kind == "auth_success":
+            who = data["username"]
+            s.set(2, "done", f"{'Registered' if self._login_mode == 'register' else 'Logged in'} as {who}")
+            if self._handshake_done:
+                return
+            if data.get("peer_key_found"):
+                s.set(3, "active")
+            else:
+                s.set(3, "waiting", f"Waiting for {data['peer']} to come online")
+        elif kind in ("handshake_started", "handshake_waiting"):
+            if s.state(2) == "done" and s.state(3) != "done":
+                s.set(3, "active")
+        elif kind == "handshake_established":
+            self._handshake_done = True
+            s.set(2, "done") if s.state(2) != "done" else None
+            s.set(3, "done", f"Keys exchanged with {data['peer']}")
+            s.set(4, "done")
+
+    def _login_failed(self, data):
+        detail = data.get("detail")
+        step = 0 if data.get("stage") == "tls" else 2
+        self.steps.grid()
+        self.steps.set(step, "error", f"{self.steps._rows[step][2].cget('text')}: {detail}")
+        self.back_button.grid()      # the form stays hidden; Back restores it for another try
+
+    def _login_progress(self, kind, data):
+        """Map a (possibly early) real event onto the progress list."""
+        if kind == "envelope_received" and data["envelope"].get("type") in (
+                "handshake_init", "handshake_response"):
+            kind, data = "handshake_started", {"peer": self.peer}
+        if kind in LOGIN_STEP_KINDS:
+            self._login_step_event(kind, data)
+
+    def _handoff_to_chat(self):
+        """Leave the login screen once the progress list has had a moment to finish."""
+        if not self._holding:
+            return
+        self._holding = False
+        data, held = self._auth_data, self._held_events
+        self._auth_data, self._held_events = None, []
+        self._apply_auth_success(data)
+        for kind, payload in held:       # replay what arrived meanwhile, in order
+            self._handle_event(kind, payload)
+
+    def _apply_auth_success(self, data):
+        pair = f"{data['username']}  ↔  {data['peer']}"
+        self.header_var.set(pair)
+        self.title(f"Secure Chat (GUI) — {pair}")
+        self._set_session_state("pending", data["peer"])
+        self._show_chat_screen()
+        if data.get("own_fingerprint"):
+            self._add_system_notice(f"Your key fingerprint: {data['own_fingerprint']}")
+        if not data.get("peer_key_found"):
+            # Normal when this side logs in first: the key is fetched again
+            # automatically once the peer joins and starts the handshake (see the
+            # "handshake_waiting" event).
+            self._add_system_notice(
+                f"{data['peer']} isn't registered or online yet -- the secure "
+                f"session will start automatically when they log in.")
+        if data.get("lab_mode"):
+            self.lab_button.config(state="normal")
 
     # --- per-message security receipt (Stage E) -------------------------------
     #
@@ -858,31 +1087,33 @@ class ChatGUI(tk.Tk):
         if kind == "tls_cert_fingerprint":
             self._append_wire(
                 f"[tls] trusting server cert fingerprint: {data['fingerprint']}", "info")
+            self._login_step_event(kind, data)
+            return
+
+        if kind == "tls_connected":
+            self._login_step_event(kind, data)
             return
 
         if kind == "auth_error":
-            self._set_login_status(f"Failed: {data.get('detail')}", error=True)
-            self.register_button.config(state="normal")
-            self.login_button.config(state="normal")
+            self._login_failed(data)
             return
 
         if kind == "auth_success":
-            pair = f"{data['username']}  ↔  {data['peer']}"
-            self.header_var.set(pair)
-            self.title(f"Secure Chat (GUI) — {pair}")
-            self._set_session_state("pending", data["peer"])
-            self._show_chat_screen()
-            if data.get("own_fingerprint"):
-                self._add_system_notice(f"Your key fingerprint: {data['own_fingerprint']}")
-            if not data.get("peer_key_found"):
-                # Normal when this side logs in first: the key is fetched
-                # again automatically once the peer joins and starts the
-                # handshake (see the "handshake_waiting" event).
-                self._add_system_notice(
-                    f"{data['peer']} isn't registered or online yet -- the secure "
-                    f"session will start automatically when they log in.")
-            if data.get("lab_mode"):
-                self.lab_button.config(state="normal")
+            self._login_step_event(kind, data)
+            self._auth_data, self._holding = data, True
+            delay = (HANDOFF_PEER_OFFLINE_MS if not data.get("peer_key_found")
+                     else (900 if self._handshake_done else HANDOFF_WAIT_MS))
+            self.after(delay, self._handoff_to_chat)
+            return
+
+        if not self._chat_ready:
+            # Still on the login screen: the chat widgets are unmapped (and unsized), so
+            # buffer chat-screen events and replay them, in order, once it is shown --
+            # while keeping the progress list live from the same real events.
+            self._login_progress(kind, data)
+            self._held_events.append((kind, data))
+            if kind == "handshake_established" and self._holding:
+                self.after(700, self._handoff_to_chat)
             return
 
         if kind == "lab_control_result":
