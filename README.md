@@ -57,7 +57,8 @@ in Finder (or run `demo/start_demo.sh` in a terminal). It stops any leftover ser
 ours, checks the TLS certificate, then opens clearly titled Terminal windows for the
 server (Attack Lab on), two chat windows and the security dashboard, and waits until
 the server is really accepting connections before launching them. Options:
-`--no-lab` (normal mode) and `--port N`. Stop everything again with
+`--no-lab` (normal mode), `--port N`, `--simple` (only the two chat windows, server in
+the background) and `--wireshark` (start a live Wireshark capture first). Stop everything again with
 `demo/stop_demo.sh`, which touches only this project's own processes (never macOS
 AirPlay, which also listens on port 5000).
 
