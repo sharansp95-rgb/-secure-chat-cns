@@ -126,6 +126,17 @@ def format_envelope_line(direction, envelope):
     if etype == "roster":
         return f"{direction} roster: users={e.get('users')}", False
 
+    if etype == "lab_control":
+        return f"{direction} lab_control: action={e.get('action')} target={e.get('target')}", False
+
+    if etype == "lab_control_result":
+        armed = e.get("armed")
+        return (f"{direction} lab_control_result: action={e.get('action')} armed={armed} "
+               f"-- {e.get('detail')}", not armed)
+
+    if etype == "lab_attack_performed":
+        return f"{direction} lab_attack_performed: {e.get('detail')}", True
+
     if etype == "user_joined":
         return f"{direction} user_joined: {e.get('username')}", False
 
@@ -189,6 +200,14 @@ class Theme:
         self.fg_pending = "#f0b429"         # amber: handshake not done yet
         self.fg_warning = "#ff5c5c"
 
+        # Stage C: Attack Lab -- deliberately a different hue (amber/orange,
+        # not the app's teal or the warning red) so the panel and its
+        # trigger button read as "a deliberate lab control", not an error.
+        self.bg_lab = "#b05a00"
+        self.bg_lab_active = "#c96600"
+        self.bg_lab_panel = "#241a0e"
+        self.fg_lab_banner = "#ffb84d"
+
         # Wire log syntax colors (kept from the original design, re-checked
         # for contrast against the new, slightly bluer dark panel shade).
         self.wire_sent = "#7fc7ff"
@@ -240,6 +259,12 @@ class Theme:
                          font=(self.ui_font, s(10), "bold"), padding=(14, 8), borderwidth=0)
         style.map("TButton",
                   background=[("active", "#17a390"), ("disabled", "#3a3a3a")],
+                  foreground=[("disabled", "#8a8a8a")])
+
+        style.configure("Lab.TButton", background=self.bg_lab, foreground="#ffffff",
+                         font=(self.ui_font, s(10), "bold"), padding=(14, 8), borderwidth=0)
+        style.map("Lab.TButton",
+                  background=[("active", self.bg_lab_active), ("disabled", "#3a3a3a")],
                   foreground=[("disabled", "#8a8a8a")])
 
         style.configure("TPanedwindow", background=self.bg_app)
@@ -387,6 +412,14 @@ class ChatGUI(tk.Tk):
         self.export_button = ttk.Button(top, text="Export Evidence",
                                          command=self._on_export_evidence)
         self.export_button.pack(side="right", padx=(0, 12))
+
+        # Stage C: only enabled once the connected server reports lab_mode
+        # (see _handle_event's "auth_success" case) -- a server not started
+        # with --lab rejects lab_control anyway, but disabling the button is
+        # the honest UI: there is nothing this client could do.
+        self.lab_button = ttk.Button(top, text="Attack Lab", style="Lab.TButton",
+                                     command=self._open_attack_lab, state="disabled")
+        self.lab_button.pack(side="right", padx=(0, 8))
 
         # -- split pane: bubble conversation (left) / wire log (right) --
         paned = ttk.Panedwindow(frame, orient="horizontal")
@@ -697,6 +730,8 @@ class ChatGUI(tk.Tk):
                 pass
             return
 
+        client.lab_mode = bool(result.get("lab_mode"))
+
         if mode == "register":
             save_private_key(username, rsa_private_key)
             client.rsa_private_key = rsa_private_key
@@ -715,7 +750,7 @@ class ChatGUI(tk.Tk):
         self.username = username
         self.peer = peer
         self.event_queue.put(("auth_success", {
-            "username": username, "peer": peer,
+            "username": username, "peer": peer, "lab_mode": client.lab_mode,
             "own_fingerprint": own_fingerprint, "peer_key_found": peer_key_found,
         }))
 
@@ -799,6 +834,89 @@ class ChatGUI(tk.Tk):
         win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
         return win
 
+    # --- Attack Lab (Stage C) --------------------------------------------------
+    #
+    # Opt-in, lab-mode-only, and enforced entirely server-side (see
+    # server/server.py's ChatServer._handle_lab_control): this panel only
+    # sends a request; the server decides whether to honor it. Detection is
+    # never claimed here -- it comes from the OTHER window's own, unmodified
+    # client-side checks (GCM tag, RSA signature, replay window, hash chain,
+    # handshake signature), visible live in that window's Conversation/Wire
+    # Log, exactly as an unprompted attack would be.
+
+    _LAB_ACTIONS = [
+        ("tamper_next", "Tamper next message",
+         "The relay flips a byte of your next message's ciphertext in transit."),
+        ("replay_last", "Replay last message",
+         "The relay immediately resends your most recent message a second time."),
+        ("drop_next", "Drop next message",
+         "The relay silently discards your next message -- it never reaches your peer."),
+        ("mitm_next_handshake", "MITM next handshake",
+         "The relay substitutes its own key in the next ECDH handshake you start "
+         "(arm this before your peer logs in, if you're the one who'll initiate)."),
+    ]
+
+    def _open_attack_lab(self):
+        if self.client is None or not self.client.lab_mode:
+            return
+        t = self.theme
+        win = tk.Toplevel(self)
+        win.title("Attack Lab")
+        win.configure(background=t.bg_lab_panel)
+        win.resizable(False, False)
+        win.transient(self)
+        win.bind("<Escape>", lambda _e: win.destroy())
+        self._lab_window = win
+
+        banner = tk.Frame(win, background=t.bg_lab, padx=16, pady=10)
+        banner.pack(fill="x")
+        tk.Label(banner, text="LAB MODE: relay is acting maliciously on request",
+                 background=t.bg_lab, foreground="#ffffff",
+                 font=(t.ui_font, t.size(11), "bold")).pack(anchor="w")
+
+        body = tk.Frame(win, background=t.bg_lab_panel, padx=18, pady=14)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text=f"Every action below targets YOUR OWN next outgoing message "
+                             f"or handshake ({self.client.username}), relayed to "
+                             f"{self.client.peer}. Each is one-shot: it fires once, then "
+                             f"disarms itself.",
+                 background=t.bg_lab_panel, foreground=t.fg_secondary,
+                 font=(t.ui_font, t.size(9)), wraplength=420, justify="left").pack(
+            anchor="w", pady=(0, 12))
+
+        self._lab_result_var = tk.StringVar(value="No action armed yet.")
+        tk.Label(body, textvariable=self._lab_result_var, background=t.bg_lab_panel,
+                 foreground=t.fg_lab_banner, font=(t.mono_font, t.size(9)),
+                 wraplength=420, justify="left").pack(anchor="w", pady=(0, 14))
+
+        for action, label, desc in self._LAB_ACTIONS:
+            row = tk.Frame(body, background=t.bg_lab_panel)
+            row.pack(fill="x", pady=(0, 10))
+            ttk.Button(row, text=label, style="Lab.TButton",
+                      command=lambda a=action: self._arm_lab_action(a)).pack(anchor="w")
+            tk.Label(row, text=desc, background=t.bg_lab_panel, foreground=t.fg_secondary,
+                     font=(t.ui_font, t.size(9)), wraplength=420, justify="left").pack(
+                anchor="w", pady=(3, 0))
+
+        ttk.Button(body, text="Close", command=win.destroy).pack(anchor="e", pady=(4, 0))
+
+        win.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - win.winfo_width()) // 2
+        y = self.winfo_rooty() + 60
+        win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    def _arm_lab_action(self, action):
+        if self.client is None:
+            return
+        label = next(l for a, l, _ in self._LAB_ACTIONS if a == action)
+        self._lab_result_var.set(f"Arming: {label}...")
+        threading.Thread(target=self.client.send_lab_control, args=(action,),
+                         daemon=True).start()
+
+    def _lab_window_alive(self):
+        win = getattr(self, "_lab_window", None)
+        return win is not None and win.winfo_exists()
+
     # --- evidence export -----------------------------------------------------
 
     def _on_export_evidence(self):
@@ -875,6 +993,21 @@ class ChatGUI(tk.Tk):
                 self._add_system_notice(
                     f"{data['peer']} isn't registered or online yet -- the secure "
                     f"session will start automatically when they log in.")
+            if data.get("lab_mode"):
+                self.lab_button.config(state="normal")
+            return
+
+        if kind == "lab_control_result":
+            if self._lab_window_alive():
+                verb = "Armed" if data.get("armed") else "Rejected"
+                self._lab_result_var.set(f"{verb}: {data.get('detail')}")
+            return
+
+        if kind == "lab_attack_performed":
+            if self._lab_window_alive():
+                self._lab_result_var.set(
+                    f"Performed by relay: {data.get('detail')}\n"
+                    f"(watch {self.peer}'s window for the result)")
             return
 
         if kind == "envelope_sent":

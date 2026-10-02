@@ -47,6 +47,7 @@ else (register, login, roster) is handled directly by the server.
 """
 
 import argparse
+import base64
 import json
 import os
 import socket
@@ -62,6 +63,10 @@ except ImportError:  # running as part of the `server` package (e.g. tests)
     from server.user_store import get_public_key, register_user, verify_user
 
 from certs.generate_certs import cert_fingerprint_from_file  # noqa: E402
+from crypto_engine.dh_exchange import generate_keypair as generate_ecdh_keypair  # noqa: E402
+from crypto_engine.signatures import generate_keypair as generate_rsa_keypair  # noqa: E402
+from crypto_engine.signatures import sign  # noqa: E402
+from server.security_log import log_event  # noqa: E402
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5000
@@ -103,11 +108,41 @@ def build_server_ssl_context(certfile=DEFAULT_CERT_PATH, keyfile=DEFAULT_KEY_PAT
 _RELAYED_TYPES = {"handshake_init", "handshake_response", "chat"}
 
 
+# Stage C: Attack Lab. One-shot, opt-in attacks performed BY THE RELAY --
+# the threat model this whole project defends against -- so the professor
+# can watch a real attack happen and get caught live, in the same two chat
+# windows, instead of only through a separate script. Every safety
+# restriction below is enforced server-side, never trusted to the GUI:
+#   * the server must be started with --lab (default: disabled, and in that
+#     default state the server behaves exactly as it always has)
+#   * even in --lab mode, a lab_control envelope is honored only from a
+#     connection whose PEER ADDRESS is 127.0.0.1, so it can never be
+#     triggered over a real network
+#   * only from a connection that has already completed register/login
+#     (the lab_control case in handle_client's main loop runs only after
+#     _authenticate() has returned a name -- the same gate every chat/
+#     handshake envelope is already behind)
+# A rejected attempt (wrong mode, wrong address, or unknown action) is
+# always logged as "lab_control_rejected" -- including when --lab was never
+# passed at all -- so a real attacker probing for this feature leaves a
+# trace. A performed attack is logged as "lab_attack_performed" and reported
+# ONLY to the client that armed it, as "armed" / "performed" -- never as a
+# claim that the attack succeeded. Whether it was actually caught is left
+# entirely to the real, unmodified client-side checks (AES-GCM tag, RSA
+# signature, replay window/nonce, hash chain, handshake signature) on
+# whichever client receives the attacked envelope -- the server never
+# announces a detection result, because in the real world a malicious relay
+# obviously wouldn't either.
+_LAB_ACTIONS = {"tamper_next", "replay_last", "drop_next", "mitm_next_handshake"}
+
+
 class ChatServer:
     def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT,
-                 certfile=DEFAULT_CERT_PATH, keyfile=DEFAULT_KEY_PATH):
+                 certfile=DEFAULT_CERT_PATH, keyfile=DEFAULT_KEY_PATH,
+                 lab_mode=False):
         self.host = host
         self.port = port
+        self.lab_mode = lab_mode
         # Built eagerly (not lazily in serve_forever) so a missing-certs
         # error surfaces immediately when the server is constructed, not
         # buried inside the accept loop.
@@ -123,6 +158,21 @@ class ChatServer:
         # route/broadcast.
         self.clients = {}
         self._lock = threading.Lock()
+
+        # Stage C lab state, all guarded by _lab_lock (separate from _lock,
+        # which is purely about self.clients, to avoid widening that lock's
+        # critical sections). _lab_pending maps a TARGET username (whose
+        # next matching outgoing envelope gets acted on) -> (action, armer
+        # username). _last_chat_envelope maps a sender username -> the most
+        # recent chat envelope genuinely relayed from them (used by
+        # replay_last). _lab_attacker_key is a throwaway RSA identity
+        # generated on first use for mitm_next_handshake -- signed with
+        # this key, never with the real target's, so the victim's signature
+        # check still fails exactly as it would for a real attacker.
+        self._lab_lock = threading.Lock()
+        self._lab_pending = {}
+        self._last_chat_envelope = {}
+        self._lab_attacker_key = None
 
     def _send(self, conn, envelope):
         try:
@@ -146,8 +196,79 @@ class ChatServer:
         for conn in targets:
             self._send(conn, envelope)
 
+    def _notify_armer(self, armer_name, detail, **extra):
+        with self._lock:
+            armer_conn = self.clients.get(armer_name)
+        if armer_conn is not None:
+            self._send(armer_conn, dict({"type": "lab_attack_performed", "detail": detail},
+                                        **extra))
+
+    def _apply_lab_tamper_or_drop(self, envelope, sender_name):
+        """Chat-envelope lab actions, applied (if armed) before the normal
+        relay below. Returns the (possibly altered) envelope, or None if it
+        should not be relayed at all (drop_next)."""
+        with self._lab_lock:
+            self._last_chat_envelope[sender_name] = envelope
+            pending = self._lab_pending.get(sender_name)
+            action = pending[0] if pending and pending[0] in ("tamper_next", "drop_next") else None
+            if action:
+                del self._lab_pending[sender_name]
+                armer = pending[1]
+
+        if action == "tamper_next":
+            raw = bytearray(base64.b64decode(envelope["ciphertext"]))
+            raw[0] ^= 0xFF  # flip every bit of the first ciphertext byte
+            tampered = dict(envelope, ciphertext=base64.b64encode(bytes(raw)).decode("ascii"))
+            detail = f"flipped a byte in {sender_name}'s next chat message's ciphertext"
+            print(f"    [LAB] {detail}.")
+            log_event("lab_attack_performed", action=action, target=sender_name, armed_by=armer)
+            self._notify_armer(armer, detail, action=action)
+            return tampered
+        if action == "drop_next":
+            detail = f"silently dropped {sender_name}'s next chat message"
+            print(f"    [LAB] {detail}.")
+            log_event("lab_attack_performed", action=action, target=sender_name, armed_by=armer)
+            self._notify_armer(armer, detail, action=action)
+            return None
+        return envelope
+
+    def _apply_lab_mitm(self, envelope, sender_name):
+        """handshake_init lab action: substitute our own ECDH public key,
+        signed with a throwaway attacker RSA key -- never the real sender's
+        -- for the one being relayed. Returns the (possibly forged)
+        envelope."""
+        with self._lab_lock:
+            pending = self._lab_pending.get(sender_name)
+            if not pending or pending[0] != "mitm_next_handshake":
+                return envelope
+            del self._lab_pending[sender_name]
+            armer = pending[1]
+            if self._lab_attacker_key is None:
+                self._lab_attacker_key = generate_rsa_keypair()[0]  # (private, public)
+            attacker_key = self._lab_attacker_key
+
+        _, attacker_ecdh_pub = generate_ecdh_keypair()
+        attacker_sig = sign(attacker_key, attacker_ecdh_pub)
+        forged = dict(envelope, pubkey=base64.b64encode(attacker_ecdh_pub).decode("ascii"),
+                      handshake_sig=base64.b64encode(attacker_sig).decode("ascii"))
+        detail = (f"substituted its own ECDH public key for {sender_name}'s in their next "
+                 f"handshake, signed with an attacker key (not {sender_name}'s)")
+        print(f"    [LAB] {detail}.")
+        log_event("lab_attack_performed", action="mitm_next_handshake", target=sender_name,
+                  armed_by=armer)
+        self._notify_armer(armer, detail, action="mitm_next_handshake")
+        return forged
+
     def route(self, envelope, sender_name):
         """Forward a handshake/chat envelope to its named recipient only."""
+        etype = envelope.get("type")
+        if etype == "chat":
+            envelope = self._apply_lab_tamper_or_drop(envelope, sender_name)
+            if envelope is None:
+                return  # drop_next: never relayed
+        elif etype == "handshake_init":
+            envelope = self._apply_lab_mitm(envelope, sender_name)
+
         to_name = envelope.get("to")
         with self._lock:
             target = self.clients.get(to_name)
@@ -161,6 +282,56 @@ class ChatServer:
                 )
             return
         self._send(target, envelope)
+
+    def _handle_lab_control(self, conn, addr, name, envelope):
+        """Arm (or, for replay_last, immediately perform) a one-shot lab
+        attack. See the _LAB_ACTIONS comment above ChatServer for the
+        safety restrictions this enforces."""
+        action = envelope.get("action")
+        target = envelope.get("target") or name
+
+        def reject(reason):
+            log_event("lab_control_rejected", requested_by=name, from_addr=addr[0],
+                      action=action, reason=reason)
+            self._send(conn, {"type": "lab_control_result", "action": action,
+                              "target": target, "armed": False, "detail": reason})
+
+        if not self.lab_mode:
+            reject("lab mode is not enabled on this server (start it with --lab)")
+            return
+        if addr[0] != "127.0.0.1":
+            reject("lab_control is only accepted from a localhost connection")
+            return
+        if action not in _LAB_ACTIONS:
+            reject(f"unknown lab action '{action}'")
+            return
+
+        if action == "replay_last":
+            with self._lab_lock:
+                last = self._last_chat_envelope.get(target)
+            if last is None:
+                reject(f"no previous chat message from {target} to replay yet")
+                return
+            detail = f"resent {target}'s most recent chat message a second time"
+            print(f"    [LAB] {detail}.")
+            log_event("lab_attack_performed", action=action, target=target, armed_by=name)
+            self._send(conn, {"type": "lab_control_result", "action": action, "target": target,
+                              "armed": True, "detail": "resent immediately"})
+            self._notify_armer(name, detail, action=action)
+            self.route(dict(last), target)  # a copy: route() may tag the next pending action
+            return
+
+        with self._lab_lock:
+            self._lab_pending[target] = (action, name)
+        detail = {
+            "tamper_next": f"next chat message from {target} will be tampered with",
+            "drop_next": f"next chat message from {target} will be silently dropped",
+            "mitm_next_handshake": f"next handshake started by {target} will have its "
+                                   f"ECDH key substituted",
+        }[action]
+        print(f"    [LAB] armed by {name} from {addr[0]}: {detail}")
+        self._send(conn, {"type": "lab_control_result", "action": action, "target": target,
+                          "armed": True, "detail": detail})
 
     def _handle_get_pubkey(self, conn, envelope):
         """Answer a "get_pubkey" request directly from user_store -- this is
@@ -242,6 +413,7 @@ class ChatServer:
                 self._send(conn, {
                     "type": "register_result", "success": True,
                     "reason": "registered and logged in",
+                    "lab_mode": self.lab_mode,
                 })
                 print(f"[+] {username} registered from {addr[0]}:{addr[1]}")
                 return username
@@ -255,6 +427,7 @@ class ChatServer:
                 self._send(conn, {
                     "type": "login_result", "success": True,
                     "reason": "login successful",
+                    "lab_mode": self.lab_mode,
                 })
                 print(f"[+] {username} logged in from {addr[0]}:{addr[1]}")
                 return username
@@ -296,6 +469,11 @@ class ChatServer:
                         self.route(envelope, name)
                     elif etype == "get_pubkey":
                         self._handle_get_pubkey(conn, envelope)
+                    elif etype == "lab_control":
+                        # Always intercepted (never silently ignored like a
+                        # genuinely unknown type) so a rejected attempt is
+                        # always logged -- see _handle_lab_control.
+                        self._handle_lab_control(conn, addr, name, envelope)
                     # Unknown/unsupported types are ignored -- the server
                     # only understands routing, never message content.
         except (ConnectionResetError, ConnectionAbortedError, OSError):
@@ -333,6 +511,10 @@ class ChatServer:
                   f"(cert fingerprint: {self.cert_fingerprint}) "
                   f"(routes handshake/chat envelopes; never sees plaintext app "
                   f"secrets or session keys)")
+            if self.lab_mode:
+                print("[*] LAB MODE ENABLED -- localhost, authenticated clients may arm "
+                      "one-shot relay attacks via lab_control. Never enable this on a "
+                      "server reachable from anywhere but localhost.")
             try:
                 while True:
                     conn, addr = srv.accept()
@@ -354,9 +536,13 @@ def main():
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--certfile", default=DEFAULT_CERT_PATH)
     parser.add_argument("--keyfile", default=DEFAULT_KEY_PATH)
+    parser.add_argument("--lab", action="store_true",
+                         help="enable the opt-in Attack Lab (lab_control envelopes from "
+                              "authenticated localhost clients only); OFF by default")
     args = parser.parse_args()
     try:
-        server = ChatServer(args.host, args.port, args.certfile, args.keyfile)
+        server = ChatServer(args.host, args.port, args.certfile, args.keyfile,
+                            lab_mode=args.lab)
     except CertsMissingError as exc:
         print(f"[!] {exc}")
         sys.exit(1)

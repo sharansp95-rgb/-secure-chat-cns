@@ -26,3 +26,6 @@ exports/
 # Course-submission files kept locally, never committed.
 CnsProj/
 CNS_Review1_*.pptx
+
+# Structured security event log (server/security_log.py) -- real activity data.
+logs/
