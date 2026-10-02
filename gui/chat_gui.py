@@ -827,6 +827,14 @@ class ChatGUI(tk.Tk):
             self._append_wire(f"[!] {msg}", "warning")
             return
 
+        if kind == "chain_warning":
+            # Authentic message(s) are missing before one that DID arrive:
+            # the message is still shown, but this is a security event.
+            msg = f"CHAIN WARNING from {data['sender']}: {data['detail']}"
+            self._add_system_notice(msg, warning=True)
+            self._append_wire(f"[!] {msg}", "warning")
+            return
+
         if kind == "system_message":
             self._add_system_notice(data["text"])
             return

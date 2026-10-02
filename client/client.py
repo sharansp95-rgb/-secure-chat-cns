@@ -104,6 +104,15 @@ from certs.generate_certs import cert_fingerprint  # noqa: E402
 from crypto_engine.aes_gcm import DecryptionError, decrypt, encrypt  # noqa: E402
 from crypto_engine.dh_exchange import compute_shared_key  # noqa: E402
 from crypto_engine.dh_exchange import generate_keypair as generate_ecdh_keypair  # noqa: E402
+from crypto_engine.hash_chain import (  # noqa: E402
+    BROKEN,
+    GAP,
+    IncomingChain,
+    OutgoingChain,
+    canonical_record,
+    genesis_hash,
+    record_hash,
+)
 from crypto_engine.signatures import deserialize_public_key, fingerprint  # noqa: E402
 from crypto_engine.signatures import generate_keypair as generate_rsa_keypair  # noqa: E402
 from crypto_engine.signatures import serialize_public_key, sign, verify  # noqa: E402
@@ -125,16 +134,6 @@ CLOCK_SKEW_SECONDS = 5
 # a little longer than the freshness window is enough, since anything older
 # than REPLAY_WINDOW_SECONDS is already rejected by the timestamp check alone.
 _NONCE_MEMORY_SECONDS = REPLAY_WINDOW_SECONDS + CLOCK_SKEW_SECONDS
-
-
-def chat_signable_bytes(message: str, timestamp: int) -> bytes:
-    """Canonical bytes signed for a chat message: the message text and its
-    timestamp together, so the timestamp can't be stripped or altered by a
-    relay/attacker without invalidating the signature. Both the sender
-    (signing) and receiver (verifying) must build this identically."""
-    return json.dumps(
-        {"message": message, "timestamp": timestamp}, sort_keys=True
-    ).encode("utf-8")
 
 
 def is_timestamp_fresh(timestamp, now=None,
@@ -287,6 +286,7 @@ class SecureChatClient:
         # Handshake / session state, guarded by _lock since the receiver
         # thread and the send loop both touch it.
         self._lock = threading.Lock()
+        self._send_lock = threading.Lock()
         self._pending_private_key = None  # our transient ECDH private key
         self.session_key = None  # 32-byte AES key once handshake completes
         self._handshake_started = False
@@ -321,10 +321,33 @@ class SecureChatClient:
         # Guarded by _lock along with everything else above.
         self._seen_nonces = {}
 
+        # Stage A: hash-chained conversation log. Created fresh for every
+        # completed handshake (see _finish_handshake) because the genesis
+        # value is derived from that handshake's public ECDH keys.
+        self._out_chain = None  # OutgoingChain: our own sending direction
+        self._in_chain = None   # IncomingChain: the peer's sending direction
+        self._pending_public_bytes = None  # our ECDH public key while we initiate
+        self._pending_handshake_sig = None  # our signature over it
+        self.handshake_record = None  # public, signed handshake values (evidence)
+
+        # Stage B: what an auditor needs. `transcript` holds ONLY messages
+        # that passed every check (both directions, in the order this client
+        # saw them); anything that failed a check goes to `rejected_events`
+        # and never into the transcript.
+        self.transcript = []
+        self.rejected_events = []
+        self.session_started_at = None
+
     def _emit(self, kind, **data):
         """Notify the presentation layer of a structured event, if one is
         listening. Never allowed to raise into the caller -- a broken GUI
         handler must not be able to break the underlying protocol logic."""
+        if kind in ("message_rejected", "chain_warning"):
+            self.rejected_events.append({
+                "at": int(time.time()), "kind": kind,
+                "sender": data.get("sender"), "reason": data.get("reason"),
+                "detail": data.get("detail"),
+            })
         if self.on_event is None:
             return
         try:
@@ -479,6 +502,8 @@ class SecureChatClient:
             self._handshake_started = True
             private_key, public_bytes = generate_ecdh_keypair()
             self._pending_private_key = private_key
+            self._pending_public_bytes = public_bytes
+            self._pending_handshake_sig = self._sign_ecdh_pubkey(public_bytes)
 
         print(f"\r[*] Starting key exchange with {self.peer}...\n> ", end="", flush=True)
         self._emit("handshake_started", peer=self.peer)
@@ -490,7 +515,7 @@ class SecureChatClient:
             # Phase 7a: sign our ECDH public key with our RSA identity key so
             # the peer can confirm it really came from us, not a relay/MITM
             # substituting its own key.
-            "handshake_sig": b64(self._sign_ecdh_pubkey(public_bytes)),
+            "handshake_sig": b64(self._pending_handshake_sig),
         })
 
     def _abort_handshake(self, reason):
@@ -528,14 +553,21 @@ class SecureChatClient:
         # point -- only the derived session key is kept.
         del private_key
 
+        response_sig = self._sign_ecdh_pubkey(public_bytes)
         self.send_envelope({
             "type": "handshake_response",
             "from": self.username,
             "to": self.peer,
             "pubkey": b64(public_bytes),
-            "handshake_sig": b64(self._sign_ecdh_pubkey(public_bytes)),
+            "handshake_sig": b64(response_sig),
         })
-        self._finish_handshake(session_key)
+        # The peer initiated, so their key is the "initiator" half of the
+        # chain genesis and ours is the "responder" half.
+        self._finish_handshake(session_key, {
+            "initiator": self.peer, "responder": self.username,
+            "initiator_pub": peer_pub, "responder_pub": public_bytes,
+            "initiator_sig": handshake_sig, "responder_sig": response_sig,
+        })
 
     def _handle_handshake_response(self, envelope):
         with self._lock:
@@ -553,6 +585,8 @@ class SecureChatClient:
         with self._lock:
             private_key = self._pending_private_key
             self._pending_private_key = None
+            own_pub = self._pending_public_bytes
+            own_sig = self._pending_handshake_sig
         if private_key is None:
             return  # consumed by a concurrent call already; nothing to do
 
@@ -569,11 +603,28 @@ class SecureChatClient:
 
         session_key = compute_shared_key(private_key, peer_pub)
         del private_key
-        self._finish_handshake(session_key)
+        self._finish_handshake(session_key, {
+            "initiator": self.username, "responder": self.peer,
+            "initiator_pub": own_pub, "responder_pub": peer_pub,
+            "initiator_sig": own_sig, "responder_sig": handshake_sig,
+        })
 
-    def _finish_handshake(self, session_key):
+    def _finish_handshake(self, session_key, handshake_record):
+        """`handshake_record` holds the PUBLIC, RSA-signed handshake values
+        (who initiated, both ECDH public keys, both signatures). The two
+        hash chains' genesis values are derived from them (Stage A), and they
+        are exported as evidence (Stage B) so an auditor can recompute it."""
         with self._lock:
             self.session_key = session_key
+            self.handshake_record = handshake_record
+            self._out_chain = OutgoingChain(self.username, genesis_hash(
+                handshake_record["initiator_pub"], handshake_record["responder_pub"],
+                self.username))
+            self._in_chain = IncomingChain(self.peer, genesis_hash(
+                handshake_record["initiator_pub"], handshake_record["responder_pub"],
+                self.peer))
+            self.transcript = []
+            self.session_started_at = int(time.time())
             queued = self._outgoing_queue
             self._outgoing_queue = []
         print(f"\r[*] Secure session established with {self.peer} "
@@ -602,42 +653,75 @@ class SecureChatClient:
         with self._lock:
             key = self.session_key
 
-        # Sign THEN encrypt: the plaintext (Phase 7b: plus a timestamp) is
-        # signed with our own long-term RSA private key first, and the
-        # {message, timestamp, signature} triple is what actually gets
-        # AES-GCM encrypted -- so both the message and its timestamp travel
-        # protected inside the same ciphertext, never sent in the clear, and
-        # the timestamp can't be stripped or altered without invalidating
-        # the signature.
-        timestamp = int(time.time())
-        signable = chat_signable_bytes(text, timestamp)
-        if self.rsa_private_key is not None:
-            signature = sign(self.rsa_private_key, signable)
-        else:
-            # No local signing key (e.g. this client never registered/loaded
-            # one) -- send unsigned rather than crash. The receiver will
-            # reject an empty signature against a real public key, so this
-            # only matters for a misconfigured/legacy account.
-            signature = b""
-        inner_payload = json.dumps({
-            "message": text,
-            "timestamp": timestamp,
-            "signature": b64(signature),
-        }).encode("utf-8")
+        # Sign THEN encrypt: the canonical record (sender, recipient, seq,
+        # timestamp, message, prev_hash -- see crypto_engine/hash_chain.py)
+        # is signed with our own long-term RSA private key first, and the
+        # {message, timestamp, seq, prev_hash, signature} bundle is what
+        # actually gets AES-GCM encrypted -- so the message, its timestamp
+        # and its place in the hash chain all travel protected inside the
+        # same ciphertext, and none of them can be stripped or altered
+        # without invalidating the signature.
+        #
+        # _send_lock keeps "take the next seq" and "put it on the wire" one
+        # atomic step, so two quick sends (the GUI sends each on its own
+        # thread) can never reach the peer out of sequence.
+        with self._send_lock:
+            timestamp = int(time.time())
+            seq, prev_hash = self._out_chain.next_fields()
+            record = canonical_record(self.username, self.peer, seq, timestamp, text, prev_hash)
+            if self.rsa_private_key is not None:
+                signature = sign(self.rsa_private_key, record)
+            else:
+                # No local signing key (e.g. this client never registered/
+                # loaded one) -- send unsigned rather than crash. The
+                # receiver will reject an empty signature against a real
+                # public key, so this only matters for a misconfigured/
+                # legacy account.
+                signature = b""
+            chain_hash = self._out_chain.commit(record)
+            inner_payload = json.dumps({
+                "message": text,
+                "timestamp": timestamp,
+                "seq": seq,
+                "prev_hash": prev_hash,
+                "signature": b64(signature),
+            }).encode("utf-8")
 
-        box = encrypt(key, inner_payload)
-        self.send_envelope({
-            "type": "chat",
-            "from": self.username,
-            "to": self.peer,
+            box = encrypt(key, inner_payload)
+            self.send_envelope({
+                "type": "chat",
+                "from": self.username,
+                "to": self.peer,
+                "nonce": b64(box["nonce"]),
+                "ciphertext": b64(box["ciphertext"]),
+                "tag": b64(box["tag"]),
+            })
+
+        receipt = {
+            "direction": "sent",
+            "sender": self.username,
+            "sender_fingerprint": self._own_fingerprint(),
+            "timestamp": timestamp,
+            "seq": seq,
+            "prev_hash": prev_hash,
+            "record_hash": chain_hash,
             "nonce": b64(box["nonce"]),
-            "ciphertext": b64(box["ciphertext"]),
-            "tag": b64(box["tag"]),
+        }
+        self.transcript.append({
+            "seq": seq, "sender": self.username, "recipient": self.peer,
+            "timestamp": timestamp, "message": text, "prev_hash": prev_hash,
+            "record_hash": chain_hash, "signature": b64(signature),
         })
         # The terminal client doesn't need an echo of what the user just
         # typed (it's already visible in their own terminal); a GUI's chat
         # panel does, since there's no other record of "what I sent".
-        self._emit("message_sent", peer=self.peer, message=text, timestamp=timestamp)
+        self._emit("message_sent", peer=self.peer, message=text, timestamp=timestamp,
+                   receipt=receipt)
+
+    def _own_fingerprint(self):
+        if self.rsa_private_key is None:
+            return None
+        return fingerprint(serialize_public_key(self.rsa_private_key.public_key()))
 
     def send_message(self, text):
         with self._lock:
@@ -687,6 +771,8 @@ class SecureChatClient:
             inner = json.loads(plaintext.decode("utf-8"))
             message_text = inner["message"]
             timestamp = inner["timestamp"]
+            seq = inner["seq"]
+            prev_hash = inner["prev_hash"]
             signature = unb64(inner["signature"])
         except (json.JSONDecodeError, KeyError, ValueError, UnicodeDecodeError):
             print(f"\r[!] WARNING: message from {sender} was malformed after "
@@ -702,7 +788,7 @@ class SecureChatClient:
                        detail="sender's public key is unknown")
             return
 
-        signable = chat_signable_bytes(message_text, timestamp)
+        signable = canonical_record(sender, self.username, seq, timestamp, message_text, prev_hash)
         if not verify(self.peer_public_key, signable, signature):
             print(f"\r[!] WARNING: signature verification FAILED for message "
                   f"from {sender} -- possible tampering or forgery -- "
@@ -757,8 +843,45 @@ class SecureChatClient:
                        detail="exact same (sender, nonce) already seen -- replay")
             return
 
+        # Stage A: hash-chain check, after every per-message check above
+        # (decrypt, signature, freshness, duplicate). The message is
+        # authentic by now; this asks whether it is the RIGHT next message.
+        with self._lock:
+            verdict = self._in_chain.check(self.username, seq, timestamp,
+                                           message_text, prev_hash)
+        if verdict.status == BROKEN:
+            print(f"\r[!] WARNING: message from {sender} rejected -- "
+                  f"{verdict.detail}.\n> ", end="", flush=True)
+            self._emit("message_rejected", sender=sender, reason="chain_broken",
+                       detail=verdict.detail)
+            return
+        if verdict.status == GAP:
+            print(f"\r[!] WARNING: {verdict.detail}.\n> ", end="", flush=True)
+            self._emit("chain_warning", sender=sender, reason="chain_gap",
+                       detail=verdict.detail)
+
+        rec_hash = record_hash(signable)
+        receipt = {
+            "direction": "received",
+            "sender": sender,
+            "sender_fingerprint": (fingerprint(self.peer_public_key_pem)
+                                   if self.peer_public_key_pem else None),
+            "timestamp": timestamp,
+            "age_seconds": max(0, int(now - float(timestamp))),
+            "seq": seq,
+            "prev_hash": prev_hash,
+            "chain_link": "gap" if verdict.status == GAP else "ok",
+            "record_hash": rec_hash,
+            "nonce": nonce_b64,
+        }
+        self.transcript.append({
+            "seq": seq, "sender": sender, "recipient": self.username,
+            "timestamp": timestamp, "message": message_text, "prev_hash": prev_hash,
+            "record_hash": rec_hash, "signature": b64(signature),
+        })
         print(f"\r{sender}: {message_text}\n> ", end="", flush=True)
-        self._emit("message_received", sender=sender, message=message_text, timestamp=timestamp)
+        self._emit("message_received", sender=sender, message=message_text,
+                   timestamp=timestamp, receipt=receipt)
 
     # --- receive loop ------------------------------------------------------
 

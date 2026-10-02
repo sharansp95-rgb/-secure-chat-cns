@@ -24,10 +24,14 @@ from client.client import (  # noqa: E402
     REPLAY_WINDOW_SECONDS,
     SecureChatClient,
     b64,
-    chat_signable_bytes,
     is_timestamp_fresh,
 )
 from crypto_engine.aes_gcm import encrypt, generate_key  # noqa: E402
+from crypto_engine.hash_chain import (  # noqa: E402
+    IncomingChain,
+    OutgoingChain,
+    canonical_record,
+)
 from crypto_engine.signatures import generate_keypair, sign  # noqa: E402
 
 
@@ -36,14 +40,24 @@ class FakeSocket:
         pass
 
 
+TEST_GENESIS = "00" * 32
+_SENDER_CHAINS = {}  # id(rsa_private_key) -> that test sender's OutgoingChain
+
+
 def build_chat_envelope(sender_name, rsa_private_key, session_key, text, timestamp):
     """Build a real, validly-encrypted, validly-signed chat envelope exactly
-    the way SecureChatClient._encrypt_and_send does, so these tests exercise
-    the real receive-side logic against realistic input."""
-    signable = chat_signable_bytes(text, timestamp)
+    the way SecureChatClient._encrypt_and_send does (including the Stage A
+    seq/prev_hash chain fields), so these tests exercise the real
+    receive-side logic against realistic input."""
+    chain = _SENDER_CHAINS.setdefault(
+        id(rsa_private_key), OutgoingChain(sender_name, TEST_GENESIS))
+    seq, prev_hash = chain.next_fields()
+    signable = canonical_record(sender_name, "bob", seq, timestamp, text, prev_hash)
+    chain.commit(signable)
     signature = sign(rsa_private_key, signable)
     inner = json.dumps({
-        "message": text, "timestamp": timestamp, "signature": b64(signature),
+        "message": text, "timestamp": timestamp, "seq": seq, "prev_hash": prev_hash,
+        "signature": b64(signature),
     }).encode("utf-8")
     box = encrypt(session_key, inner)
     return {
@@ -57,9 +71,11 @@ def receiver():
     """A client with an established session, ready to receive from 'alice'."""
     priv_a, pub_a = generate_keypair()
     session_key = generate_key()
+    _SENDER_CHAINS.pop(id(priv_a), None)
     client = SecureChatClient(FakeSocket(), "bob", "alice")
     client.session_key = session_key
     client.peer_public_key = pub_a
+    client._in_chain = IncomingChain("alice", TEST_GENESIS)
     return client, priv_a, session_key
 
 
@@ -159,11 +175,13 @@ def test_tampering_with_timestamp_after_signing_is_caught_by_signature(receiver,
     # that simply re-encrypting a "corrected" timestamp (without a valid new
     # signature) is caught by the signature check -- simulate by building a
     # fresh inner payload with a bumped timestamp but the OLD signature.
-    old_signable = chat_signable_bytes("old but forge-updated", old_timestamp)
+    old_signable = canonical_record("alice", "bob", 1, old_timestamp,
+                                     "old but forge-updated", TEST_GENESIS)
     old_signature = sign(priv_a, old_signable)
     forged_inner = json.dumps({
         "message": "old but forge-updated",
         "timestamp": int(time.time()),  # bumped to look fresh
+        "seq": 1, "prev_hash": TEST_GENESIS,
         "signature": b64(old_signature),  # but signature still covers the OLD timestamp
     }).encode("utf-8")
     box = encrypt(session_key, forged_inner)
