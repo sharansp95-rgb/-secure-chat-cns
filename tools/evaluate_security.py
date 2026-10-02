@@ -770,9 +770,16 @@ def write_markdown(results, path, command):
         "Parameters used: `" + json.dumps(p) + "`",
         "",
         "Everything ran against a local lab-mode server on an OS-chosen loopback port with a temporary user store,",
-        "security log and exports folder (deleted afterwards). Lockout used the production thresholds (5 failures",
-        f"within 5 minutes) except that the lock lasted {p['lock_seconds']} s so a burst could be repeated, and the per-address",
-        "rate limit was disabled so it would not throttle the experiment's own logins.",
+        "security log and exports folder (deleted afterwards).",
+        "",
+        f"> **Caveat 1 - lockout duration.** For the repeated wrong-password trials the lock duration was shortened to "
+        f"**{p['lock_seconds']} s** so a burst could be repeated {p['attacks_per_type']} times quickly. The production "
+        "schedule is **30 s, 60 s, 120 s, 300 s, 900 s (capped at 15 min)**. The threshold (5 failures within 5 minutes) "
+        "is the production one; the per-address rate limit was disabled so it would not throttle the experiment's own logins.",
+        ">",
+        "> **Caveat 2 - loopback, one machine.** All timings were taken on loopback on a single machine "
+        f"({m['cpu']}), with client and server sharing one CPU. Real network latency would be **added** to the "
+        "end-to-end message and session-setup figures; the numbers measure the cryptographic and protocol cost only.",
         "",
         "## 1. Functional verification",
         "",

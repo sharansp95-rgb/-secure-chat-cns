@@ -32,3 +32,6 @@ logs/
 
 # macOS Finder metadata.
 .DS_Store
+
+# files moved aside for later deletion (never committed)
+_to_delete/

@@ -31,9 +31,11 @@ python tools/evaluate_security.py
 Parameters used: `{"quick": false, "attacks_per_type": 20, "normal_sessions": 10, "messages_per_session": 20, "iterations": 500, "pbkdf2_n": 30, "keygen_n": 20, "e2e_n": 500, "setup_n": 30, "lock_seconds": 0.5, "message_bytes": 78}`
 
 Everything ran against a local lab-mode server on an OS-chosen loopback port with a temporary user store,
-security log and exports folder (deleted afterwards). Lockout used the production thresholds (5 failures
-within 5 minutes) except that the lock lasted 0.5 s so a burst could be repeated, and the per-address
-rate limit was disabled so it would not throttle the experiment's own logins.
+security log and exports folder (deleted afterwards).
+
+> **Caveat 1 - lockout duration.** For the repeated wrong-password trials the lock duration was shortened to **0.5 s** so a burst could be repeated 20 times quickly. The production schedule is **30 s, 60 s, 120 s, 300 s, 900 s (capped at 15 min)**. The threshold (5 failures within 5 minutes) is the production one; the per-address rate limit was disabled so it would not throttle the experiment's own logins.
+>
+> **Caveat 2 - loopback, one machine.** All timings were taken on loopback on a single machine (Apple M2), with client and server sharing one CPU. Real network latency would be **added** to the end-to-end message and session-setup figures; the numbers measure the cryptographic and protocol cost only.
 
 ## 1. Functional verification
 

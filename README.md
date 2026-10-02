@@ -251,8 +251,10 @@ Measured, not claimed: `tools/evaluate_security.py` drives the real code against
 | Full session setup (TLS + login + signed handshake) | median 44.8 ms, p95 46.3 ms |
 | Review 1 requirement, encryption overhead < 1 s | PASS (every p95 is far below 1 s) |
 
-Limits: one machine over loopback (no network delay); small fixed attack counts show the checks work on
-these attacks, not that no attack could evade them.
+**Caveats.** (1) For the repeated wrong-password trials the lockout duration was shortened to **0.5 s**; the
+production schedule is 30 s, 60 s, 120 s, 300 s, 900 s (capped at 15 min). (2) All timings are on loopback on one
+machine (Apple M2), so real network latency would be added to the end-to-end figures. Also, small fixed attack
+counts show the checks work on these attacks, not that no attack could evade them.
 
 ![Evaluation summary](docs/screenshots/10_evaluation_results.png)
 
