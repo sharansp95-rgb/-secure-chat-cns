@@ -98,6 +98,31 @@ def find_pids_on_port(port):
     return _find_pids_on_port_unix(port)
 
 
+def _command_line(pid):
+    """The command line of `pid`, or None if it can't be determined."""
+    try:
+        if sys.platform.startswith("win"):
+            result = subprocess.run(
+                ["wmic", "process", "where", f"processid={pid}", "get", "commandline"],
+                capture_output=True, text=True, timeout=10)
+        else:
+            result = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                                    capture_output=True, text=True, timeout=10)
+        text = result.stdout.strip()
+        return text or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def is_project_server(pid):
+    """True only if `pid` is a `server.py` process. Anything else listening on
+    the port -- notably macOS's AirPlay Receiver (ControlCenter), which also
+    uses port 5000 -- is NOT ours and must never be killed by this script. If
+    the command line can't be read, assume it is not ours."""
+    command = _command_line(pid)
+    return bool(command) and "server.py" in command
+
+
 def _kill_pid(pid):
     """Best-effort kill. Returns True on apparent success. Never raises --
     callers already only reach here after the user explicitly confirmed."""
@@ -143,7 +168,19 @@ def handle_port_in_use(host, port, auto_yes):
         print(f"    Please close whatever is using it manually, then re-run this script.")
         return False
 
-    print(f"[!] Found PID(s) listening on port {port}: {', '.join(str(p) for p in pids)}")
+    ours = [p for p in pids if is_project_server(p)]
+    foreign = [p for p in pids if p not in ours]
+    for pid in foreign:
+        print(f"[*] PID {pid} is listening on port {port} but is not a server.py "
+              f"process ({_command_line(pid) or 'command unknown'}) -- leaving it alone.")
+    if not ours:
+        print(f"[*] No server.py of ours is listening on port {port}, so there is no "
+              f"stale server to restart.")
+        return True
+    pids = ours
+
+    print(f"[!] Found server.py PID(s) listening on port {port}: "
+          f"{', '.join(str(p) for p in pids)}")
 
     if auto_yes:
         confirmed = True
