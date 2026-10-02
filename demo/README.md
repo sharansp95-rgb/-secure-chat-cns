@@ -41,7 +41,7 @@ filter and steps to produce your own capture, e.g. a longer one.
 
 ```
 python certs/generate_certs.py     # once, if you haven't already
-pytest tests/ -v                   # all 105 automated tests (Phases 2-7b + hash chain + evidence)
+pytest tests/ -v                   # all 144 automated tests (Phases 2-7b + hash chain + evidence + Attack Lab + lockout)
 python demo/run_tamper_demo.py
 python demo/run_replay_demo.py
 python demo/run_mitm_handshake_demo.py

@@ -7,10 +7,13 @@ server and any network observer can never read in plaintext: each session starts
 an RSA-signed ECDH (X25519) handshake between the two peers (never trusting the server
 to broker keys), derives a fresh AES-256-GCM session key, signs and encrypts every
 message with it, wraps the whole client↔server connection in TLS, gates every
-connection behind a PBKDF2-hashed login, and rejects replayed or tampered messages —
-all properties backed by 105 automated tests and five live attack-and-defense
-demo scripts, plus a Tkinter GUI whose "Wire Log" panel makes the cryptography visible
-during a demo instead of invisible.
+connection behind a PBKDF2-hashed login, rejects replayed or tampered messages, detects
+a relay dropping or reordering messages via a hash-chained conversation log, and locks
+out repeated failed logins — all properties backed by 144 automated tests and five
+live attack-and-defense demo scripts, plus a Tkinter GUI whose "Wire Log" panel makes
+the cryptography visible during a demo instead of invisible, an opt-in **Attack Lab**
+that triggers those same attacks for real with one click, and a live **Security
+Dashboard**.
 
 PDF copies of this documentation are available in [`docs/pdf/`](docs/pdf/) for offline
 viewing or printing.
@@ -30,6 +33,8 @@ trusts neither user nor server**.
 | **Relay drops or reorders a message** | Each message is authentic on its own; conversation integrity isn't a surfaced, auditable guarantee | **Detected**: a per-sender hash chain (sequence number + hash of the previous message, inside the signed payload) flags "message(s) missing, possible deletion by the relay" |
 | **Evidence for a third party** | None: nothing exportable that proves anything | **Signed evidence file** plus a standalone verifier (`tools/verify_transcript.py`) that imports no client or server code |
 | **What the user can see** | Opaque; at most a safety number | **Security receipt** on every message (click a bubble) and a live **Wire Log** of what actually crosses the network |
+| **Live attacks, on demand** | Not applicable (no equivalent feature) | **Attack Lab**: a GUI panel that arms a real relay attack (tamper/replay/drop/MITM) for the next message, caught live by the other window's real, unmodified checks |
+| **Account abuse / intrusion visibility** | Not applicable | **Login lockout** with exponential backoff, and a live **Security Dashboard** showing event counts, a colour-coded feed, and currently-locked accounts |
 
 **Target use cases:** regulated environments where "who said what, and was anything
 removed?" must have a defensible answer: healthcare instructions (a dosage order, and
@@ -37,6 +42,13 @@ proof that a later "stop" order was not silently dropped), financial approvals,
 legal and compliance communication, and command chains where orders must be
 attributable and complete. It is **not** the right tool where plausible deniability
 matters (e.g. whistleblowing or dissent): there, use Signal.
+
+**Making attacks and defenses visible from inside the app itself** (not just in
+separate scripts) is the other half of this: the opt-in **Attack Lab** (see "Running
+the Attack Lab + Security Dashboard" below) lets the team trigger a real relay attack
+with one click during a live demo and watch the other window's real client-side
+checks catch it, and the **Security Dashboard** gives a continuously-updated view of
+every login failure, lockout, and detected attack across the whole server.
 
 ## Quick start (clean clone → working two-GUI demo)
 
@@ -86,6 +98,8 @@ test that exercises it (verified — see "Running the tests" below):
 | **Access control** | A connection is not admitted to the roster or allowed to route any handshake/chat envelope until it completes a successful PBKDF2-checked login | `auth/password_hash.py`, `server/server.py` (`_authenticate`) | `tests/test_tls_setup.py::test_tls_client_wrong_password_login_rejected` |
 | **Integrity of conversation** | A per-sender SHA-256 hash chain (`seq` + `prev_hash`, inside the signed and encrypted payload) lets the receiver detect a relay silently dropping, reordering or injecting messages | `crypto_engine/hash_chain.py`, chain check in `client/client.py` | `tests/test_hash_chain.py::test_real_pipeline_detects_relay_dropping_a_message` |
 | **Evidence** | Both directions of a session can be exported as one JSON file, signed by the exporter, and checked offline by an independent verifier (signatures, both hash chains, chain heads, export signature) | `client/evidence.py`, `tools/verify_transcript.py` | `tests/test_evidence_export.py::test_editing_one_message_makes_it_invalid_and_names_that_message` |
+| **Attack Lab containment** | A `lab_control` request is honored only when the server was started with `--lab`, only from a localhost peer, and only from an already-authenticated connection; any other attempt is rejected and logged, never silently ignored | `server/server.py` (`_handle_lab_control`) | `tests/test_attack_lab.py::test_lab_control_rejected_from_non_localhost_peer` |
+| **Login lockout** | After repeated failed logins, an account is locked with exponential backoff; a locked attempt is rejected *before* PBKDF2 runs, so hammering a locked account cannot be used to burn CPU | `server/lockout.py` | `tests/test_security_events.py::test_full_lockout_flow_end_to_end` |
 
 Run any single one directly, e.g. `pytest tests/test_aes_gcm.py::test_ciphertext_is_not_plaintext -v`.
 
@@ -93,6 +107,16 @@ Run any single one directly, e.g. `pytest tests/test_aes_gcm.py::test_ciphertext
 
 Said out loud, not buried — these are the honest edges of this project's scope:
 
+- **The Attack Lab has no one-click brute-force/lockout demo button.** Lockout is
+  real and fully tested (`tests/test_lockout.py`, and
+  `tests/test_security_events.py::test_full_lockout_flow_end_to_end` end to end
+  through a real server, including that a locked attempt skips PBKDF2 entirely), but
+  the GUI does not expose a button that fires repeated login attempts at a named
+  account, even against one's own test account. See it live instead by running a
+  handful of deliberate wrong-password **Login** attempts in a GUI window.
+- **Login lockout state is in memory only**, per `server/lockout.py`'s docstring: a
+  server restart clears every lock and failure count. Acceptable for a single
+  course-project relay server; a production system would persist it.
 - **The register/login password is not protected beyond TLS.** The AES-GCM/RSA layer
   only exists between two chat *peers*, after a handshake; it doesn't cover the
   client↔server login exchange, which relies entirely on TLS. If the server itself
@@ -161,8 +185,42 @@ python demo/run_evidence_demo.py
 
 See [`demo/README.md`](demo/README.md) for more detail, and
 [`demo/full_walkthrough.md`](demo/full_walkthrough.md) for the full click-by-click
-live demo script (GUI + these three scripts + the Wireshark capture, with talking
-points and timing).
+live demo script (GUI + these demo scripts + the Wireshark capture + the Attack Lab
+and Security Dashboard, with talking points and timing).
+
+## Running the Attack Lab + Security Dashboard
+
+**1. Start the server with `--lab`** (off by default -- a server started without it
+behaves exactly as before, and rejects and logs any `lab_control` request it
+receives):
+
+```
+python server/server.py --lab
+```
+
+**2. Open the security dashboard**, in its own window, any time (it only tails
+`logs/security_events.jsonl` -- it never connects to the server):
+
+```
+python gui/security_dashboard.py
+```
+
+**3. Open two GUI clients** as in "Quick start" above. Once a secure session is
+established, each window shows an **Attack Lab** button (amber, top bar) -- it's only
+enabled when the connected server reports lab mode. Click it to open the panel (the
+amber "LAB MODE" banner is deliberate, so it's never mistaken for a real error), then
+click **Tamper next message**, **Replay last message**, **Drop next message**, or
+**MITM next handshake**. Each one is a real, one-shot attack carried out by the
+relay server itself -- never simulated -- and the *other* window's real, unmodified
+checks (AES-GCM tag, replay window, hash chain, or handshake signature) catch it live,
+exactly as the standalone `demo/run_*.py` scripts demonstrate, with the dashboard's
+event feed updating in real time alongside it.
+
+Login lockout triggers automatically: five wrong passwords for one username within
+five minutes lock that account with exponential backoff (30s, 60s, 120s, ... capped at
+15 minutes); the dashboard's "Locked accounts" panel shows it and the remaining time.
+A locked login is rejected *before* PBKDF2 ever runs (see `server/lockout.py`), so this
+cannot be used to burn CPU against an account that's already locked.
 
 ## Running the tests
 
@@ -171,12 +229,22 @@ pip install -r requirements.txt
 pytest tests/ -v
 ```
 
-105 tests across 9 files (the first seven one per project phase): `test_aes_gcm.py` (encryption),
-`test_dh_exchange.py` (key exchange), `test_password_hash.py` (login),
+144 tests across 12 files (the first seven one per project phase): `test_aes_gcm.py`
+(encryption), `test_dh_exchange.py` (key exchange), `test_password_hash.py` (login),
 `test_signatures.py` (non-repudiation), `test_handshake_auth.py` (signed-handshake
 MITM fix), `test_replay_protection.py` (replay defenses), `test_tls_setup.py`
-(transport security), plus `test_hash_chain.py` (dropped/reordered-message detection) and
-`test_evidence_export.py` (signed export + offline verifier, including tampered files).
+(transport security), plus `test_hash_chain.py` (dropped/reordered-message detection),
+`test_evidence_export.py` (signed export + offline verifier, including tampered files),
+`test_attack_lab.py` (opt-in lab-mode relay attacks and their safety restrictions),
+`test_lockout.py` (login lockout + per-address rate limiting), and
+`test_security_events.py` (the security event log end to end, including the full
+lockout flow and that a locked attempt never runs PBKDF2).
+
+A small minority of the TLS-over-localhost integration tests (mainly in
+`test_attack_lab.py`/`test_security_events.py`, which open several real TLS
+connections back to back) can occasionally time out under heavy machine load rather
+than fail on an actual assertion -- rerunning `pytest` resolves it; this is a known
+characteristic of this environment, not a logic bug.
 
 ## How to run (detail)
 

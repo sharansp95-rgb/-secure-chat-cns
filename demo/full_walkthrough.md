@@ -2,8 +2,13 @@
 
 Read this straight through, live, in front of the professor. Every step names the
 exact thing to type or click, what should appear on screen, and a short line to say
-out loud. **Total spoken time target: ~9 minutes** (per-step estimates below; padding
-included for questions).
+out loud. **Total spoken time target: ~9:30 for the core demo** (see the timing table
+at the end for the full breakdown; padding included for questions). The core demo
+(sections 1-7, 13, 14) runs entirely inside the GUI: two chat windows plus a live
+**Security Dashboard**, with a real relay attack triggered by clicking a button in the
+**Attack Lab** panel and caught live by the other window's own checks. Sections 8-12
+(Wireshark and the standalone `demo/run_*.py` scripts) are optional padding / a backup
+if any live click doesn't cooperate.
 
 Assumes: Windows or any OS with Python 3.8+, this repo cloned, and
 `pip install -r requirements.txt` already run. If not, run that first — it's not
@@ -34,8 +39,13 @@ instead: `python certs/generate_certs.py`, skippable if `certs/server.crt` and
 **1.2** In that same terminal, start the relay server:
 
 ```
-python server/server.py
+python server/server.py --lab
 ```
+
+`--lab` turns on the opt-in **Attack Lab**: it has no effect at all unless a
+`lab_control` request also comes from an already-logged-in, localhost connection (see
+["How this differs from WhatsApp/Signal"](../README.md#how-this-differs-from-whatsappsignal)
+in the main README), so this is safe to leave on for the whole demo.
 
 **Confirm it printed a line like this** before moving on (the port will read `5000`
 unless you passed `--port`, and the fingerprint will be whatever `reset_environment.py`
@@ -51,9 +61,23 @@ Leave this terminal running and visible for the whole demo — minimize it to a 
 of the screen; you'll point at it in step 5 to show it never prints anyone's message
 content.
 
-**1.3** Quick sanity check (optional but recommended): run `pytest tests/ -v` once and
-confirm it ends with `105 passed`. This is not shown to the professor; it's your own
-confidence check that nothing is broken before you start.
+**1.3** In a second terminal, open the security dashboard (it only reads
+`logs/security_events.jsonl` — it never connects to the server, so it's harmless to
+leave open for the whole demo, including right now before anything has happened):
+
+```
+python gui/security_dashboard.py
+```
+
+Drag it to a corner of the screen, visible but out of the way of the two chat windows
+you'll open next.
+
+**1.4** Quick sanity check (optional but recommended): run `pytest tests/ -v` once and
+confirm it ends with `144 passed` (very occasionally one of the real-TLS integration
+tests times out under load rather than fails on an actual assertion — see the main
+README's "Running the tests" section; just rerun `pytest` if that happens). This is
+not shown to the professor; it's your own confidence check that nothing is broken
+before you start.
 
 ---
 
@@ -188,7 +212,68 @@ teal bubbles to show the sent version ("✔ signed with your private key").
 
 ---
 
-## 7. (Optional) Open the Wireshark capture for a static packet view — **~60 sec**
+## 7. Attack Lab: live relay attacks from the GUI — **~3:30 min**
+
+Both windows show an amber **Attack Lab** button in the top bar (it's only enabled
+because the server is running with `--lab`). Click it in the **left** (alice) window
+to open the panel — point at the amber **"LAB MODE: relay is acting maliciously on
+request"** banner first.
+
+> **Say:** "Everything in this panel is a real attack, carried out by our actual relay
+> server against its own connection, not a simulation. What catches it is the exact
+> same client-side code we've already shown — nothing special runs when lab mode is
+> on."
+
+**7.1 Tamper.** Click **Tamper next message**. The result line reads `Armed: next
+chat message from alice will be tampered with`. Type a message (e.g. `transfer
+approved`) and click **Send**. **Expected:** alice's window shows the result line
+change to `Performed by relay: flipped a byte in...`; the **right** (bob) window shows
+a red system notice `REJECTED message from alice: AES-GCM authentication failed
+(tampered or wrong key)` — the tampered text itself is never displayed. The dashboard's
+event feed gains a red `lab_attack_performed` line and a red `security_alert` line
+(bob's own client reporting what it just caught).
+
+> **Say:** "The relay really did flip a bit of the ciphertext — and our AES-GCM tag
+> catches it, same as the standalone tamper demo, just triggered from inside the app."
+
+**7.2 Drop.** Click **Drop next message**. Send a message — it **never appears** in
+bob's window at all (the relay silently discarded it; alice's own window still shows
+her own sent bubble, since that's drawn locally). Send one more message: bob's window
+now shows a red notice **"N message(s) missing ... possible deletion by the relay"**
+— the hash chain exposing the hole.
+
+> **Say:** "This is the one none of the other checks can catch on their own — a
+> message that's dropped has nothing to fail authentication on, because it never
+> arrives. The hash chain is what notices something's missing."
+
+**7.3 Replay.** Send one ordinary message first (so there's something to replay), then
+click **Replay last message**. **Expected:** it fires immediately (not on your next
+send) — bob's window briefly shows the same message content arrive, followed at once
+by a red **"duplicate message detected ... rejected as a replay"** notice; the message
+is never displayed twice.
+
+**7.4 MITM next handshake** *(timing-sensitive — see the note below)*. This one
+substitutes the relay's own ECDH key into the handshake itself, so it only works
+**before** a session is already established. Close both windows, restart them, and in
+the **left** (alice) window — register but do **not** yet log in from the right window
+— open Attack Lab and click **MITM next handshake** right away. Then register in the
+**right** (bob) window. **Expected:** bob's window shows `HANDSHAKE ABORTED` and never
+reaches "Secure session established"; sending a message from either side afterward
+re-attempts the handshake for real (now unarmed) and succeeds normally.
+
+> If the timing doesn't line up live, say so plainly and run the guaranteed-reliable
+> version instead: `python demo/run_mitm_handshake_demo.py` (section 10 below) proves
+> the identical defense deterministically.
+
+**7.5** Point at the dashboard's **event counts** row across all of the above — note
+the `lab_attack_performed` and `security_alert` counters climbing — and say:
+
+> **Say:** "Every one of those was a real attack and a real, independent catch,
+> logged centrally without either chat window having to trust the other."
+
+---
+
+## 8. (Optional) Open the Wireshark capture for a static packet view — **~60 sec**
 
 Skip this step if short on time; it's a supplement to the live demo, not required.
 
@@ -235,7 +320,9 @@ match, even though alice registered and chatted in this session. The same is tru
 
 ---
 
-## 8. Run the tamper-detection demo — **~60 sec**
+## 9. Backup: standalone tamper-detection script — **~60 sec, optional**
+
+Skip this whole backup section (9-12) unless something in the live Attack Lab (section 7) didn't cooperate, or you have extra time and want to show the exact same defenses proven a second, fully deterministic way.
 
 **8.1** In a fourth terminal (or reuse the one from step 1.3), at the project root,
 run:
@@ -270,7 +357,7 @@ authentication (tampered or wrong key) -- discarded.`
 
 ---
 
-## 9. Run the replay-protection demo — **~60 sec**
+## 10. Backup: standalone replay-protection script — **~60 sec, optional**
 
 **9.1** Run:
 
@@ -303,7 +390,7 @@ Point at the line above reading `[!] WARNING: duplicate message detected from ..
 
 ---
 
-## 10. Run the MITM handshake demo — **~75 sec**
+## 11. Backup: standalone MITM handshake script — **~75 sec, optional**
 
 **10.1** Run:
 
@@ -346,7 +433,7 @@ fingerprints printed at the bottom.
 
 ---
 
-## 11. Run the dropped-message demo — **~60 sec**
+## 12. Backup: standalone dropped-message script — **~60 sec, optional**
 
 **11.1** Run:
 
@@ -380,7 +467,7 @@ message(s) missing` line two steps later.
 
 ---
 
-## 12. Export signed evidence and verify it independently — **~90 sec**
+## 13. Export signed evidence and verify it independently — **~90 sec**
 
 **12.1** In either GUI window, click **Export Evidence** (top bar, left of the
 fingerprint strip). A notice appears in the Conversation panel:
@@ -423,7 +510,7 @@ To verify a GUI export yourself instead (optional):
 
 ---
 
-## 13. Closing statement — **~30 sec**
+## 14. Closing statement — **~30 sec**
 
 > **Say:** "Going back to our Review 1 problem statement: we set out to build a chat
 > system where the relay server — which has to exist, to actually deliver messages —
@@ -432,12 +519,15 @@ To verify a GUI export yourself instead (optional):
 > man-in-the-middle — are all defended against, not just encrypted-and-hoped. And
 > beyond what WhatsApp or Signal set out to do, it's an auditable messenger: every
 > message is attributable to its author, a relay silently dropping a message is
-> detected, and a signed evidence file can be verified by a third party. What you've
-> just seen is that working end to end: a real GUI with a security receipt on every
-> message, a real wire log showing exactly what crosses the network, and four live
-> attacks each caught by a specific, testable defense — all backed by 105 automated
-> tests in our repo. Happy to answer
-> questions or run any of this again."
+> detected, and a signed evidence file can be verified by a third party. And beyond
+> even that, the system is self-monitoring: an Attack Lab that triggers real relay
+> attacks on demand, a login lockout that stops password guessing, and a live
+> security dashboard tying it all together. What you've just seen is that working end
+> to end: a real GUI with a security receipt on every message, a real wire log
+> showing exactly what crosses the network, live attacks triggered from inside the
+> app and caught by specific, testable defenses, and a dashboard watching all of it —
+> all backed by 144 automated tests in our repo. Happy to answer questions or run any
+> of this again."
 
 ---
 
@@ -450,12 +540,11 @@ To verify a GUI export yourself instead (optional):
 | 4. Register bob | 0:45 |
 | 5. Compare fingerprints | 0:45 |
 | 6. Exchange messages | 1:30 |
-| 7. Wireshark (optional) | 1:00 |
-| 8. Tamper demo | 1:00 |
-| 9. Replay demo | 1:00 |
-| 10. MITM handshake demo | 1:15 |
-| 11. Dropped-message demo | 1:00 |
-| 12. Evidence export + verifier | 1:30 |
-| 13. Closing | 0:30 |
-| **Total (with step 7)** | **~11:30** |
-| **Total (without step 7, if short on time)** | **~10:30** |
+| 7. Attack Lab (tamper/drop/replay/MITM) | 3:30 |
+| 8. Wireshark (optional) | 1:00 |
+| 9-12. Backup standalone scripts (optional/skip) | 4:15 |
+| 13. Evidence export + verifier | 1:30 |
+| 14. Closing | 0:30 |
+| **Core demo (1-7, 13, 14, no backups)** | **~9:30** |
+| **Core demo + Wireshark (step 8)** | **~10:30** |
+| **Full walkthrough, including all backup scripts** | **~14:45** |
