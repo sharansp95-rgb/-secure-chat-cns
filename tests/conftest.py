@@ -197,3 +197,17 @@ def wait_for_events(log_path, event_type, count=1, timeout=10):
                 f"expected {count} '{event_type}' event(s) within {timeout}s, "
                 f"found {len(found)}")
         time.sleep(0.02)
+
+
+@pytest.fixture(autouse=True)
+def _finalize_tk_objects_on_the_main_thread():
+    """Collect garbage right after every test, on the main thread.
+
+    A destroyed Tk window leaves tkinter objects (Variables, ...) in reference cycles. If
+    the garbage collector happens to run later on ANOTHER thread (e.g. a chat server
+    thread in a networking test), tkinter finalises them there and Tcl aborts the whole
+    process ("Tcl_AsyncDelete: async handler deleted by the wrong thread"; seen as exit
+    code 133). Collecting here keeps that from ever happening."""
+    yield
+    import gc
+    gc.collect()
