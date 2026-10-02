@@ -69,7 +69,13 @@ class SecurityDashboard(tk.Tk):
         tk.Label(top, text="SECURITY DASHBOARD -- read-only, not connected to the server",
                  background=t.bg_lab, foreground="#ffffff",
                  font=(t.ui_font, t.size(11), "bold")).pack(side="left")
-        self.path_var = tk.StringVar(value=f"watching: {self.log_path}")
+        # Show the log path relative to the project when it lives inside it: the
+        # absolute path is long enough to be clipped next to the title.
+        shown = os.path.relpath(self.log_path, os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        if shown.startswith(".."):
+            shown = self.log_path
+        self.path_var = tk.StringVar(value=f"watching: {shown}")
         tk.Label(top, textvariable=self.path_var, background=t.bg_lab, foreground="#ffe8c8",
                  font=(t.mono_font, t.size(8))).pack(side="right")
 

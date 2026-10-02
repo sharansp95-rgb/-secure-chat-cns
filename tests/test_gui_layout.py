@@ -61,3 +61,18 @@ def test_message_box_and_send_button_are_never_clipped(app, size):
         assert widget.winfo_ismapped()
         assert widget.winfo_height() > 20, f"{widget} squeezed to {widget.winfo_height()}px"
         assert widget.winfo_rooty() + widget.winfo_height() <= bottom, "runs off the window"
+
+
+def test_dashboard_shows_a_short_relative_log_path():
+    """The dashboard header showed the absolute log path, which was clipped to
+    a fragment next to the title; inside the project it must be relative."""
+    import gui.security_dashboard as dashboard
+    try:
+        window = dashboard.SecurityDashboard()
+    except tk.TclError as exc:
+        pytest.skip(f"no display available for Tk: {exc}")
+    try:
+        window.geometry("+10000+10000")
+        assert window.path_var.get() == "watching: logs/security_events.jsonl"
+    finally:
+        window.destroy()
