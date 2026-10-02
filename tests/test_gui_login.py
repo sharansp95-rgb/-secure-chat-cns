@@ -129,7 +129,8 @@ def test_events_before_the_chat_screen_are_buffered_and_replayed_in_order(app):
     app.update()
     assert app._chat_ready and app._held_events == []
     # replay ran AFTER the "pending" header was set, so the final state is secure
-    assert "End-to-end encrypted" in app.session_status.cget("text")
+    assert "Secure session established" in app.session_status.cget("text")
+    assert app.chip_e2e.kind == "ok"
 
 
 def test_tls_failure_marks_the_first_step_red_and_back_restores_the_form(app):

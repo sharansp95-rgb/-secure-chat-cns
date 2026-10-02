@@ -1,11 +1,11 @@
-"""The chat header must fit at the smallest window the GUI allows.
+"""The chat window's header, buttons and input row must fit at the smallest window the GUI
+allows, and the dashboard/login layouts must not clip.
 
-Regression test for a bug the Review 2 screenshots exposed: the Export
-Evidence and Attack Lab buttons shared one row with the long status text and
-the big fingerprint banner, so at the default window size they were clipped to
-nothing and a user could not see (let alone click) them. Tk reports each
-row's REQUIRED width; if that exceeds the window's minimum width, something is
-being squeezed out. Skipped automatically where no display is available.
+Regression tests for bugs the Review 2 screenshots exposed (the action buttons squeezed out
+of the header, the message box pushed off the bottom, the dashboard path and Locked
+accounts pane clipped, the login card too tall). Tk reports each row's REQUIRED width;
+if that exceeds the window's width, something is being squeezed out. Skipped
+automatically where no display is available.
 """
 
 import tkinter as tk
@@ -22,37 +22,57 @@ def app():
     except tk.TclError as exc:
         pytest.skip(f"no display available for Tk: {exc}")
     window.geometry("+10000+10000")  # realize it far off-screen, never flashing
+    window.update()
     yield window
+    window.update()
     window.destroy()
 
 
-def test_header_rows_fit_the_minimum_window_width(app):
+def _long_header(app):
     app._show_chat_screen()
-    app.fp_label.config(text="bob's fingerprint: 57AB D182 C165 53B7")
-    app._set_session_state("secure", "bob")
+    app.peer_label.config(text="a_rather_long_username")
+    app.me_label.config(text="You: another_long_username")
+    app._peer_fingerprint = "57AB D182 C165 53B7"
+    app.peer = "a_rather_long_username"
+    app._set_session_state("secure", app.peer)
     app.update()
+
+
+def test_header_rows_fit_the_minimum_window_width(app):
+    """The action buttons (and the avatar) always fit, even with very long usernames: they
+    are packed first so a long name is clipped instead. The chip row fits as a whole, and
+    the long status sentence is dropped on a narrow window."""
+    _long_header(app)
     min_width = app.minsize()[0]
-    for widget in (app.fp_strip.master, app.export_button.master):
-        assert widget.winfo_reqwidth() <= min_width, (
-            f"header row needs {widget.winfo_reqwidth()}px but the window may be "
-            f"only {min_width}px wide -- widgets would be clipped")
+    app.geometry(f"{min_width}x600+10000+10000")
+    app.update()
+    app.update()
+    row1 = [w for w in app.header_row1.winfo_children() if w.winfo_manager()
+            and w is not app.header_row1.winfo_children()[-1]]
+    fixed = sum(w.winfo_reqwidth() for w in (app.avatar, app.lab_button, app.export_button,
+                                              app.network_button))
+    assert fixed <= app.winfo_width(), f"avatar + action buttons need {fixed}px"
+    chips = sum(w.winfo_reqwidth() for w in app.chip_row.winfo_children() if w.winfo_manager())
+    assert chips <= app.winfo_width(), f"chip row needs {chips}px but the window is {app.winfo_width()}px"
+    assert app._status_hidden, "the long status sentence should be dropped on a narrow window"
 
 
-def test_action_buttons_are_actually_mapped_and_inside_the_window(app):
-    app.geometry("1040x660+10000+10000")  # the default size
-    app._show_chat_screen()
+@pytest.mark.parametrize("size", ["1040x660", "720x520"])
+def test_action_buttons_are_actually_mapped_and_inside_the_window(app, size):
+    app.geometry(f"{size}+10000+10000")
+    _long_header(app)
     app.update()
     width = app.winfo_width()
-    for button in (app.export_button, app.lab_button):
+    for button in (app.export_button, app.lab_button, app.network_button):
         assert button.winfo_ismapped()
-        assert button.winfo_width() > 40, "button squeezed to (almost) nothing"
+        assert button.winfo_width() > 60, f"{button.cget('text')} squeezed to {button.winfo_width()}px"
         assert button.winfo_rootx() - app.winfo_rootx() + button.winfo_width() <= width
 
 
-@pytest.mark.parametrize("size", ["1040x660", "780x480"])  # default and minimum
+@pytest.mark.parametrize("size", ["1040x660", "680x460"])  # default and minimum
 def test_message_box_and_send_button_are_never_clipped(app, size):
-    """The input row used to be packed after the expanding split pane, so a
-    taller header (or a short window) clipped the message box and Send button."""
+    """The input row used to be packed after the expanding split pane, so a taller header
+    (or a short window) clipped the message box and Send button."""
     app.geometry(f"{size}+10000+10000")
     app._show_chat_screen()
     app.update()
@@ -64,8 +84,8 @@ def test_message_box_and_send_button_are_never_clipped(app, size):
 
 
 def test_dashboard_shows_a_short_relative_log_path():
-    """The dashboard header showed the absolute log path, which was clipped to
-    a fragment next to the title; inside the project it must be relative."""
+    """The dashboard header showed the absolute log path, which was clipped to a fragment
+    next to the title; inside the project it must be relative."""
     import gui.security_dashboard as dashboard
     try:
         window = dashboard.SecurityDashboard()
@@ -73,14 +93,16 @@ def test_dashboard_shows_a_short_relative_log_path():
         pytest.skip(f"no display available for Tk: {exc}")
     try:
         window.geometry("+10000+10000")
+        window.update()
         assert window.path_var.get() == "watching: logs/security_events.jsonl"
     finally:
+        window.update()
         window.destroy()
 
 
 def test_dashboard_locked_account_text_wraps_instead_of_being_clipped(tmp_path):
-    """The 'locked -- retry in Ns (lockout #N)' line is longer than the narrow
-    Locked accounts pane and was clipped; it must wrap."""
+    """The 'locked -- retry in Ns (lockout #N)' line is longer than the narrow Locked
+    accounts pane and was clipped; it must wrap."""
     import json
     import time as _time
     import gui.security_dashboard as dashboard
@@ -99,13 +121,14 @@ def test_dashboard_locked_account_text_wraps_instead_of_being_clipped(tmp_path):
         assert labels, "locked account was not rendered"
         assert all(int(str(l.cget("wraplength"))) > 0 for l in labels)
     finally:
+        window.update()
         window.destroy()
 
 
 def test_dashboard_header_and_locked_pane_fit_at_the_launcher_width():
     """At 700px wide (what demo/start_demo.sh uses) the dashboard header showed
-    "/securit" and the Locked accounts pane showed "Locked acco" / "ounts
-    currently": both must fit."""
+    "/securit" and the Locked accounts pane showed "Locked acco" / "ounts currently":
+    both must fit."""
     import gui.security_dashboard as dashboard
     try:
         window = dashboard.SecurityDashboard()  # default log path: shown relative to the project
@@ -120,12 +143,13 @@ def test_dashboard_header_and_locked_pane_fit_at_the_launcher_width():
         assert window.paned.sashpos(0) >= 220, "Locked accounts pane is too narrow"
         assert window.locked_empty_label.winfo_reqwidth() <= window.paned.sashpos(0)
     finally:
+        window.update()
         window.destroy()
 
 
 def test_login_card_fits_in_a_short_window(app):
-    """The login card (about 590px tall) was clipped top and bottom in
-    windows shorter than that, e.g. when several windows share one screen."""
+    """The login card was clipped top and bottom in windows shorter than it is, e.g. when
+    several windows share one screen."""
     app.geometry("780x540+10000+10000")
     app.update()
     card = app.login_frame.winfo_children()[0]

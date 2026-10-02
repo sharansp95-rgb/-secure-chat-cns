@@ -278,6 +278,8 @@ class Theme:
         button("Lab.TButton", self.bg_lab, self.bg_lab_hover, self.fg_on_accent)      # Attack Lab
         button("Danger.TButton", self.bg_danger, "#c9302c", self.fg_on_accent)
         button("Ghost.TButton", self.bg_panel, self.bg_raised, self.fg_secondary)
+        style.configure("Ghost.TButton", borderwidth=1, bordercolor=self.border,
+                        lightcolor=self.bg_panel, darkcolor=self.bg_panel)
 
         style.configure("TPanedwindow", background=self.bg_app)
         style.configure("TScrollbar", background=self.bg_raised, troughcolor=self.bg_app,

@@ -142,6 +142,8 @@ class Chip(tk.Label):
         "info": ("bg_accent_soft", "accent"),
         "warn": ("bg_warning_soft", "warning"),
         "bad":  ("bg_danger_soft", "danger"),
+        "bad_dark":  ("bg_app", "danger"),     # on top of a red card
+        "warn_dark": ("bg_app", "warning"),    # on top of an amber card
     }
 
     def __init__(self, parent, theme, text, kind="off", mono=False, command=None):
@@ -168,7 +170,7 @@ class PlaceholderText(tk.Text):
     with its content up to `max_lines`, and shows grey placeholder text while empty."""
 
     def __init__(self, parent, theme, placeholder="", max_lines=4, **kw):
-        super().__init__(parent, wrap="word", height=1, borderwidth=0, highlightthickness=1,
+        super().__init__(parent, wrap="word", height=1, width=10, borderwidth=0, highlightthickness=1,
                          highlightbackground=theme.border, highlightcolor=theme.accent,
                          background=theme.bg_input, foreground=theme.fg_primary,
                          insertbackground=theme.fg_primary, font=theme.font("body"),
@@ -176,8 +178,12 @@ class PlaceholderText(tk.Text):
         self.theme, self.placeholder, self.max_lines = theme, placeholder, max_lines
         self._showing_placeholder = False
         self.tag_configure("placeholder", foreground=theme.fg_hint)
-        self.bind("<FocusIn>", lambda _e: self._hide_placeholder())
+        # The placeholder stays visible while the empty box has focus and goes away on the
+        # first keystroke (or paste).
+        self.bind("<FocusIn>", lambda _e: self.mark_set("insert", "1.0") if self._showing_placeholder else None)
         self.bind("<FocusOut>", lambda _e: self._show_placeholder())
+        self.bind("<KeyPress>", self._on_keypress)
+        self.bind("<<Paste>>", lambda _e: self._hide_placeholder(), add="+")
         self.bind("<KeyRelease>", lambda _e: self._autogrow())
         self.bind("<Return>", self._on_return)
         self.bind("<Shift-Return>", self._on_shift_return)
@@ -192,7 +198,15 @@ class PlaceholderText(tk.Text):
         self.delete("1.0", "end")
         self.insert("1.0", text)
         self._autogrow()
-        if not text and self.focus_get() is not self:
+        if not text:
+            self._show_placeholder()
+
+    def set_placeholder(self, text):
+        was_showing = self._showing_placeholder
+        if was_showing:
+            self._hide_placeholder()
+        self.placeholder = text
+        if was_showing:
             self._show_placeholder()
 
     def _show_placeholder(self):
@@ -207,9 +221,24 @@ class PlaceholderText(tk.Text):
             self._showing_placeholder = False
 
     def _autogrow(self):
-        lines = int(self.count("1.0", "end-1c", "displaylines", return_ints=True)[0]) \
-            if self.get("1.0", "end-1c") else 1
+        text = self.get("1.0", "end-1c")
+        lines = 1
+        if text and not self._showing_placeholder:
+            try:
+                counted = self.count("1.0", "end-1c", "displaylines")
+                lines = int(counted[0]) if counted else text.count("\n") + 1
+            except (tk.TclError, TypeError, ValueError, IndexError):
+                lines = text.count("\n") + 1
         self.configure(height=max(1, min(self.max_lines, lines)))
+
+    def _on_keypress(self, event):
+        if not self._showing_placeholder:
+            return None
+        if event.keysym in ("BackSpace", "Delete"):
+            return "break"
+        if event.char and event.char.isprintable():
+            self._hide_placeholder()
+        return None
 
     def _on_return(self, _event):
         self.event_generate("<<Send>>")
@@ -252,6 +281,8 @@ class StepList(tk.Frame):
 
     def set(self, index, state, text=None):
         t = self.theme
+        if index >= len(self._rows):      # no steps shown (e.g. the list was never started)
+            return
         _frame, glyph, label = self._rows[index]
         color = {"pending": t.fg_hint, "active": t.accent, "done": t.success,
                  "error": t.danger, "waiting": t.warning}[state]
@@ -263,6 +294,8 @@ class StepList(tk.Frame):
             label.configure(text=text)
 
     def state(self, index):
+        if index >= len(self._rows):
+            return "pending"
         glyph = self._rows[index][1].cget("text")
         return next(k for k, v in self.GLYPH.items() if v == glyph)
 

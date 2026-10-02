@@ -52,10 +52,12 @@ from crypto_engine.signatures import fingerprint  # noqa: E402
 from crypto_engine.signatures import generate_keypair as generate_rsa_keypair  # noqa: E402
 from crypto_engine.signatures import serialize_public_key  # noqa: E402
 from gui import widgets  # noqa: E402
+from gui.explain import describe_rejection  # noqa: E402
 from gui.theme import Theme  # noqa: E402
 
 POLL_INTERVAL_MS = 50
 TAGLINE = "Accountable end-to-end encrypted messaging for hospitals"
+NETWORK_MIN_WIDTH = 860       # narrower windows start with the network view hidden
 HANDOFF_WAIT_MS = 2500        # how long the login screen waits for the handshake to finish
 HANDOFF_PEER_OFFLINE_MS = 1300
 LOGIN_STEP_KINDS = ("tls_connected", "tls_cert_fingerprint", "handshake_started",
@@ -71,6 +73,26 @@ WIRE_LOG_TRUNCATE = 32
 # chat envelope's own fields (nonce/ciphertext/tag) never contain plaintext
 # to begin with.
 _REDACT_FIELDS = {"password"}
+
+
+def WIRE_COLORS(theme):
+    """Colour of each kind of line in the network view."""
+    return {"TLS": theme.wire_tls, "HANDSHAKE": theme.wire_handshake, "CHAT": theme.wire_chat,
+            "ALERT": theme.wire_alert, "AUTH": theme.wire_auth, "INFO": theme.wire_info}
+
+
+def wire_kind(envelope):
+    """Which kind of network-view line an envelope is."""
+    etype = envelope.get("type", "")
+    if etype in ("handshake_init", "handshake_response", "get_pubkey", "pubkey_result"):
+        return "HANDSHAKE"
+    if etype == "chat":
+        return "CHAT"
+    if etype in ("register", "login", "register_result", "login_result"):
+        return "AUTH"
+    if etype in ("security_alert", "lab_control", "lab_control_result", "lab_attack_performed"):
+        return "ALERT"
+    return "INFO"
 
 
 def validate_login_form(host, port, username, peer, password):
@@ -121,8 +143,8 @@ def format_envelope_line(direction, envelope):
     if etype in ("handshake_init", "handshake_response"):
         return (
             f"{direction} {etype}: from={e.get('from')} to={e.get('to')} "
-            f"pubkey={_truncate(e.get('pubkey', ''))} "
-            f"sig={_truncate(e.get('handshake_sig', ''))}",
+            f"pubkey={_truncate(e.get('pubkey', ''), 14)} "
+            f"sig={_truncate(e.get('handshake_sig', ''), 14)}",
             False,
         )
 
@@ -139,9 +161,9 @@ def format_envelope_line(direction, envelope):
     if etype == "chat":
         return (
             f"{direction} chat: from={e.get('from')} "
-            f"nonce={_truncate(e.get('nonce', ''))} "
-            f"ciphertext={_truncate(e.get('ciphertext', ''))} "
-            f"tag={_truncate(e.get('tag', ''))}",
+            f"nonce={_truncate(e.get('nonce', ''), 12)} "
+            f"ciphertext={_truncate(e.get('ciphertext', ''), 12)} "
+            f"tag={_truncate(e.get('tag', ''), 12)}",
             False,
         )
 
@@ -173,7 +195,7 @@ class ChatGUI(tk.Tk):
         super().__init__()
         self.title("Secure Chat (GUI)")
         self.geometry("1040x660")
-        self.minsize(780, 480)
+        self.minsize(680, 460)
 
         self.theme = Theme(self)
         self.configure(background=self.theme.bg_app)
@@ -408,179 +430,236 @@ class ChatGUI(tk.Tk):
         t = self.theme
         frame = tk.Frame(self, background=t.bg_app)
         self.chat_frame = frame
+        self._items = []             # everything shown in the conversation (re-rendered on rescale)
+        self._wrappables = []        # (label, margin): re-wrapped when the pane is resized
+        self._last_date = None
+        self._session_ready = False
+        self._network_visible = True
+        self._tls_text = "TLS 1.3"
+        self._peer_fingerprint = None
 
-        # -- top bar, two rows. Row 1: identity (left) + fingerprint strip
-        # (right). Row 2: session status (left) + action buttons (right).
-        # They used to share ONE row, where the long status text plus the
-        # large fingerprint banner used up the whole width and the right-packed
-        # Export Evidence / Attack Lab buttons were clipped to nothing at the
-        # default window size.
-        top = tk.Frame(frame, background=t.bg_panel, padx=16, pady=10)
-        top.pack(side="top", fill="x")
+        # -- header: avatar + names + actions, then the status chips -----------------
+        header = tk.Frame(frame, background=t.bg_panel, padx=t.sp("lg"), pady=t.sp("md"))
+        header.pack(side="top", fill="x")
+        self.header_frame = header
+        self.header_row1 = row1 = tk.Frame(header, background=t.bg_panel)
+        row1.pack(side="top", fill="x")
         self.header_var = tk.StringVar(value="")
-        ttk.Label(top, textvariable=self.header_var, style="Header.TLabel").pack(
-            side="left", anchor="w")
-
-        self.fp_strip = tk.Frame(top, background=t.bg_pending, padx=12, pady=6)
-        self.fp_strip.pack(side="right")
-        self.fp_label = tk.Label(self.fp_strip, text="", background=t.bg_pending,
-                                  font=(t.mono_font, t.size(12), "bold"))
-        self.fp_label.pack()
-
-        status_row = tk.Frame(frame, background=t.bg_panel, padx=16)
-        status_row.pack(side="top", fill="x")
-        self.session_status = tk.Label(status_row, text="", background=t.bg_panel,
-                                        font=(t.ui_font, t.size(9)))
-        self.session_status.pack(side="left", anchor="w", pady=(0, 10))
-
-        # Stage B: write a signed evidence file for this session.
-        self.export_button = ttk.Button(status_row, text="Export Evidence",
-                                         command=self._on_export_evidence)
-        self.export_button.pack(side="right", pady=(0, 10))
-
-        # Stage C: only enabled once the connected server reports lab_mode
-        # (see _handle_event's "auth_success" case) -- a server not started
-        # with --lab rejects lab_control anyway, but disabling the button is
-        # the honest UI: there is nothing this client could do.
-        self.lab_button = ttk.Button(status_row, text="Attack Lab", style="Lab.TButton",
+        # Actions, packed FIRST (right-to-left): Tk gives space in packing order, so a long
+        # name can never squeeze them out of the header. The Attack Lab button is only enabled once the
+        # connected server reports lab_mode (see _apply_auth_success): a server not started
+        # with --lab rejects lab_control anyway, so disabling it is the honest UI.
+        self.lab_button = ttk.Button(row1, text="Attack Lab", style="Lab.TButton",
                                      command=self._open_attack_lab, state="disabled")
-        self.lab_button.pack(side="right", padx=(0, 8), pady=(0, 10))
+        self.export_button = ttk.Button(row1, text="Export Evidence", style="Secondary.TButton",
+                                        command=self._on_export_evidence)
+        self.network_button = ttk.Button(row1, text="Network", style="Ghost.TButton",
+                                         command=self._toggle_network)
+        for button in (self.lab_button, self.export_button, self.network_button):
+            button.pack(side="right", padx=(t.sp("sm"), 0))
 
-        # The input row is packed BEFORE the expanding split pane on purpose:
-        # Tk gives space to widgets in packing order, so packing it afterwards
-        # let the pane take everything and clipped the message box and Send
-        # button whenever the window was short.
-        # -- entry + send --
-        entry_frame = tk.Frame(frame, background=t.bg_app, padx=10)
-        entry_frame.pack(side="bottom", fill="x", pady=(0, 10))
-        self.message_var = tk.StringVar()
-        self.message_entry = ttk.Entry(entry_frame, textvariable=self.message_var,
-                                        font=(t.ui_font, t.size(11)))
-        self.message_entry.pack(side="left", fill="x", expand=True, ipady=5)
-        self.message_entry.bind("<Return>", lambda _e: self._on_send())
-        self.send_button = ttk.Button(entry_frame, text="Send", command=self._on_send)
-        self.send_button.pack(side="left", padx=(8, 0))
+        self.avatar = widgets.Avatar(row1, t, "?", size=t.sp(44))
+        self.avatar.pack(side="left", padx=(0, t.sp("md")))
+        ident = tk.Frame(row1, background=t.bg_panel)
+        ident.pack(side="left")
+        self.peer_label = tk.Label(ident, text="", background=t.bg_panel,
+                                   foreground=t.fg_primary, font=t.font("heading"), anchor="w")
+        self.peer_label.pack(anchor="w")
+        sub = tk.Frame(ident, background=t.bg_panel)
+        sub.pack(anchor="w")
+        self.me_label = tk.Label(sub, text="", background=t.bg_panel, foreground=t.fg_secondary,
+                                 font=t.font("caption"))
+        self.me_label.pack(side="left")
+        self.session_status = tk.Label(sub, text="", background=t.bg_panel,
+                                       font=t.font("caption_bold"))
+        self.session_status.pack(side="left", padx=(t.sp("sm"), 0))
+        self._status_hidden = False
+        row1.bind("<Configure>", lambda _e: self._fit_header())
 
-        # -- split pane: bubble conversation (left) / wire log (right) --
+        self.chip_row = self.fp_strip = chips = tk.Frame(header, background=t.bg_panel)
+        chips.pack(side="top", fill="x", pady=(t.sp("md"), 0))
+        self.chip_tls = widgets.Chip(chips, t, "TLS 1.3", "off")
+        self.chip_e2e = widgets.Chip(chips, t, "End-to-end encrypted", "off")
+        self.chip_signed = widgets.Chip(chips, t, "Signed", "off")
+        self.fp_chip = self.fp_label = widgets.Chip(chips, t, "Fingerprint pending", "warn",
+                                                    mono=True, command=self._copy_fingerprint)
+        for chip in (self.chip_tls, self.chip_e2e, self.chip_signed, self.fp_chip):
+            chip.pack(side="left", padx=(0, t.sp("sm")))
+
+        # -- input row (packed BEFORE the expanding pane: Tk gives space in packing order,
+        # so packing it afterwards let the pane take everything and clip the message box
+        # and Send button whenever the window was short) -------------------------------
+        entry_frame = tk.Frame(frame, background=t.bg_app)
+        entry_frame.pack(side="bottom", fill="x", padx=t.sp("lg"), pady=(0, t.sp("md")))
+        self.entry_frame = entry_frame
+        self.send_button = ttk.Button(entry_frame, text="Send", command=self._on_send,
+                                      state="disabled")
+        self.send_button.pack(side="right", padx=(t.sp("sm"), 0), fill="y")
+        self.message_entry = widgets.PlaceholderText(
+            entry_frame, t, placeholder="Waiting for the secure session...", max_lines=4)
+        self.message_entry.pack(side="left", fill="x", expand=True)
+        self.message_entry.bind("<<Send>>", lambda _e: self._on_send())
+        self.message_entry.bind("<KeyRelease>", lambda _e: self._update_send_state(), add="+")
+
+        # -- body: conversation (left) / network view (right) -------------------------
         paned = ttk.Panedwindow(frame, orient="horizontal")
-        paned.pack(side="top", fill="both", expand=True, padx=10, pady=10)
+        paned.pack(side="top", fill="both", expand=True, padx=t.sp("md"), pady=t.sp("md"))
         self.paned = paned
 
         chat_pane = tk.Frame(paned, background=t.bg_panel)
         chat_head = tk.Frame(chat_pane, background=t.bg_panel)
-        chat_head.pack(side="top", fill="x")
-        ttk.Label(chat_head, text="Conversation", style="SectionTitle.TLabel",
-                  padding=(10, 8, 10, 4)).pack(side="left")
-        ttk.Label(chat_head, text="click a message for its security receipt",
-                  style="Hint.TLabel").pack(side="right", padx=(0, 10), pady=(8, 4))
+        chat_head.pack(side="top", fill="x", padx=t.sp("md"), pady=(t.sp("sm"), t.sp("xs")))
+        tk.Label(chat_head, text="Conversation", background=t.bg_panel,
+                 foreground=t.fg_secondary, font=t.font("body_bold")).pack(side="left")
+        tk.Label(chat_head, text="click a message for its security receipt",
+                 background=t.bg_panel, foreground=t.fg_hint,
+                 font=t.font("caption")).pack(side="right")
         self._build_bubble_panel(chat_pane)
         paned.add(chat_pane, weight=3)
+        self.chat_pane = chat_pane
 
         wire_pane = tk.Frame(paned, background=t.bg_panel_alt)
         wire_head = tk.Frame(wire_pane, background=t.bg_panel_alt)
-        wire_head.pack(side="top", fill="x")
-        ttk.Label(wire_head, text="Wire Log (what actually crosses the network)",
-                  style="SectionTitle.TLabel", background=t.bg_panel_alt,
-                  padding=(10, 8, 10, 4)).pack(side="left")
-        legend = tk.Frame(wire_head, background=t.bg_panel_alt)
-        legend.pack(side="right", padx=(0, 10), pady=(8, 4))
-        for text, color in (("--> sent", t.wire_sent), ("<-- received", t.wire_recv),
-                            ("rejected", t.wire_warning)):
-            tk.Label(legend, text=text, background=t.bg_panel_alt, foreground=color,
-                     font=(t.mono_font, t.size(8))).pack(side="left", padx=(10, 0))
-        # width=40 keeps the Text's *requested* width small, so the
-        # Panedwindow's 3:2 weights (not this widget's 80-char default)
-        # decide how the window's width is split between the two panes.
+        wire_head.pack(side="top", fill="x", padx=t.sp("md"), pady=(t.sp("sm"), t.sp("xs")))
+        tk.Label(wire_head, text="Network view", background=t.bg_panel_alt,
+                 foreground=t.fg_secondary, font=t.font("body_bold")).pack(side="left")
+        for label, color in (("ALERT", t.wire_alert), ("CHAT", t.wire_chat),
+                             ("HANDSHAKE", t.wire_handshake), ("TLS", t.wire_tls)):
+            tk.Label(wire_head, text=label, background=t.bg_panel_alt, foreground=color,
+                     font=t.font("mono_small_bold")).pack(side="right", padx=(t.sp("sm"), 0))
+        tk.Label(wire_pane, text="what actually crosses the network (values shortened)",
+                 background=t.bg_panel_alt, foreground=t.fg_hint, font=t.font("caption"),
+                 anchor="w").pack(side="top", fill="x", padx=t.sp("md"))
+        # width=40 keeps the Text's *requested* width small, so the Panedwindow's weights
+        # (not this widget's 80-char default) decide how the width is split.
         self.wire_text = tk.Text(wire_pane, wrap="word", state="disabled", width=40,
-                                  font=(t.mono_font, t.size(9)), background=t.bg_panel_alt,
-                                  foreground=t.wire_info, insertbackground=t.fg_primary,
-                                  borderwidth=0, highlightthickness=0, padx=10, pady=6)
+                                 font=t.font("mono_small"), background=t.bg_panel_alt,
+                                 foreground=t.fg_secondary, insertbackground=t.fg_primary,
+                                 borderwidth=0, highlightthickness=0, padx=t.sp("md"),
+                                 pady=t.sp("sm"), spacing1=2, spacing3=2)
         wire_scroll = ttk.Scrollbar(wire_pane, orient="vertical", command=self.wire_text.yview)
         self.wire_text.configure(yscrollcommand=wire_scroll.set)
-        self.wire_text.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=(0, 6))
-        wire_scroll.pack(side="right", fill="y", pady=(0, 6))
-        self.wire_text.tag_config("sent", foreground=t.wire_sent)
-        self.wire_text.tag_config("recv", foreground=t.wire_recv)
-        self.wire_text.tag_config("warning", foreground=t.wire_warning,
-                                   font=(t.mono_font, t.size(9), "bold"))
-        self.wire_text.tag_config("info", foreground=t.wire_info)
+        wire_scroll.pack(side="right", fill="y", pady=(0, t.sp("sm")))
+        self.wire_text.pack(side="left", fill="both", expand=True, pady=(0, t.sp("sm")))
+        self.wire_text.tag_config("ts", foreground=t.fg_hint)
+        for kind, color in WIRE_COLORS(t).items():
+            self.wire_text.tag_config(f"badge_{kind}", foreground=color, font=t.font("mono_small_bold"))
+            self.wire_text.tag_config(f"body_{kind}", foreground=color if kind == "ALERT"
+                                      else t.fg_secondary)
         paned.add(wire_pane, weight=2)
+        self.wire_pane = wire_pane
+
+    # -- header state -----------------------------------------------------------------
 
     def _set_session_state(self, state, peer, detail=""):
-        """Header status line + fingerprint strip colors. `state` is one of
-        "pending" (amber), "secure" (green), or "error" (red, shows `detail`)."""
+        """Header status + chips. `state` is "pending" (amber), "secure" (green) or
+        "error" (red, shows `detail`)."""
         t = self.theme
         if state == "pending":
-            self.session_status.config(
-                text=f"●  Waiting for {peer} to come online and complete the handshake...",
-                foreground=t.fg_pending)
-            self.fp_strip.config(background=t.bg_pending)
-            self.fp_label.config(text=f"{peer}'s fingerprint: (handshake not complete yet)",
-                                 background=t.bg_pending, foreground=t.fg_pending)
+            self.session_status.config(text=f"·  ● Waiting for {peer} to come online...",
+                                       foreground=t.warning)
+            for chip in (self.chip_tls, self.chip_e2e, self.chip_signed):
+                chip.set("off")
+            self.chip_tls.set("off", self._tls_text)
+            self.fp_chip.set("warn", "Fingerprint pending")
         elif state == "secure":
-            self.session_status.config(
-                text="●  End-to-end encrypted (ECDH + AES-256-GCM, RSA-signed)",
-                foreground=t.fg_accent)
-            self.fp_strip.config(background=t.bg_fingerprint)
-            self.fp_label.config(background=t.bg_fingerprint, foreground=t.fg_accent)
+            self.session_status.config(text="·  ● Secure session established", foreground=t.success)
+            self.chip_tls.set("ok", self._tls_text)
+            self.chip_e2e.set("ok")
+            self.chip_signed.set("ok")
+            self.fp_chip.set("info", self._fingerprint_chip_text())
         else:
-            self.session_status.config(text=f"●  {detail}", foreground=t.fg_warning)
+            self.session_status.config(text=f"·  ● {detail}", foreground=t.danger)
+            for chip in (self.chip_e2e, self.chip_signed):
+                chip.set("bad")
+        self._update_send_state()
 
-    # --- WhatsApp-style bubble conversation panel -----------------------
+    def _fit_header(self):
+        """On a narrow window drop the long status sentence (the chips already show the
+        state) rather than letting the action buttons be squeezed out of the header."""
+        row = self.header_row1
+        avail = row.winfo_width()
+        if avail <= 1:
+            return
+        status_w = self.session_status.winfo_reqwidth() + self.theme.sp("sm")
+        if self._status_hidden:
+            if avail >= row.winfo_reqwidth() + status_w + self.theme.sp("lg"):
+                self.session_status.pack(side="left", padx=(self.theme.sp("sm"), 0))
+                self._status_hidden = False
+        elif avail < row.winfo_reqwidth():
+            self.session_status.pack_forget()
+            self._status_hidden = True
+
+    def _fingerprint_chip_text(self):
+        return f"Key  {self._peer_fingerprint}  ⧉" if self._peer_fingerprint \
+            else "Fingerprint pending"
+
+    def _copy_fingerprint(self):
+        if not self._peer_fingerprint:
+            return
+        widgets.copy_to_clipboard(self, self._peer_fingerprint)
+        self.fp_chip.set("ok", "Copied to clipboard ✓")
+        self.after(1400, lambda: self.fp_chip.set("info", self._fingerprint_chip_text()))
+
+    def _toggle_network(self, show=None):
+        show = (not self._network_visible) if show is None else show
+        if show == self._network_visible:
+            return
+        self._network_visible = show
+        if show:
+            self.paned.add(self.wire_pane, weight=2)
+            self.update_idletasks()
+            self.paned.sashpos(0, int(self.paned.winfo_width() * 0.58))
+        else:
+            self.paned.forget(self.wire_pane)
+        self.network_button.config(style="Ghost.TButton" if show else "Secondary.TButton")
+        self._rerender_items()   # the conversation just got wider/narrower
+
+    def _update_send_state(self):
+        ready = self._session_ready and bool(self.message_entry.get_text().strip())
+        self.send_button.config(state="normal" if ready else "disabled")
+
+    # --- conversation panel ---------------------------------------------------------------
     #
-    # Implementation choice: a Canvas-drawn rounded rectangle behind each
-    # message, rather than a plain Frame/Label block. Tkinter's native
-    # widgets have no border-radius option at all, but Canvas.create_polygon
-    # with smooth=True over a rounded-rectangle point path gives genuinely
-    # curved corners for a modest amount of code (see _rounded_rect_points),
-    # which reads as a real "bubble" rather than a padded rectangle -- worth
-    # the extra complexity here specifically, since this panel is the one
-    # most visibly "the chat app" during a demo. Bubbles live inside a
-    # standard Tkinter scrollable-frame-on-a-canvas (the idiomatic pattern
-    # for scrollable widget lists, since ttk has no native one).
+    # Each message is drawn on a small Canvas (rounded rectangle, name, text, time and a
+    # shield), packed into a scrollable frame. Tkinter's native widgets have no
+    # border-radius, but Canvas.create_polygon(smooth=True) over a rounded-rectangle path
+    # gives genuinely curved corners for little code. Everything shown is kept in
+    # self._items, so the whole conversation can be re-drawn (Presentation mode, network
+    # view toggle) without losing anything.
 
     def _build_bubble_panel(self, parent):
         t = self.theme
         container = tk.Frame(parent, background=t.bg_panel)
-        container.pack(side="top", fill="both", expand=True, padx=(6, 0), pady=(0, 6))
-
-        # width=360: a small requested width so the Panedwindow weights decide
-        # the split (see the matching note on wire_text).
+        container.pack(side="top", fill="both", expand=True, padx=(t.sp("xs"), 0),
+                       pady=(0, t.sp("xs")))
+        # width=360: a small requested width so the Panedwindow weights decide the split.
         self.bubble_canvas = tk.Canvas(container, background=t.bg_panel, width=360,
-                                        borderwidth=0, highlightthickness=0)
-        self._notice_labels = []
-        scrollbar = ttk.Scrollbar(container, orient="vertical",
-                                   command=self.bubble_canvas.yview)
+                                       borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.bubble_canvas.yview)
         self.bubble_list = tk.Frame(self.bubble_canvas, background=t.bg_panel)
-
         self.bubble_list.bind(
             "<Configure>",
-            lambda _e: self.bubble_canvas.configure(
-                scrollregion=self.bubble_canvas.bbox("all")),
-        )
+            lambda _e: self.bubble_canvas.configure(scrollregion=self.bubble_canvas.bbox("all")))
         self._bubble_window = self.bubble_canvas.create_window(
             (0, 0), window=self.bubble_list, anchor="nw")
         self.bubble_canvas.bind("<Configure>", self._on_bubble_canvas_resize)
         self.bubble_canvas.configure(yscrollcommand=scrollbar.set)
         self.bubble_canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-
         self.bind_all("<MouseWheel>", self._on_mousewheel)
 
     def _on_bubble_canvas_resize(self, event):
-        # Keep the inner frame's width matched to the canvas's width so rows
-        # (and therefore left/right alignment) resize correctly instead of
-        # staying pinned to whatever width they were first drawn at -- and
-        # re-wrap system notices to the new width so they never get clipped.
+        # Keep the inner frame as wide as the canvas so rows (and left/right alignment)
+        # resize correctly, and re-wrap notices/cards so they are never clipped.
         self.bubble_canvas.itemconfigure(self._bubble_window, width=event.width)
-        for label in self._notice_labels:
-            label.config(wraplength=max(event.width - 40, 120))
+        for label, margin in self._wrappables:
+            label.config(wraplength=max(event.width - margin, 120))
 
     def _on_mousewheel(self, event):
-        """Scroll the conversation only when the pointer is over it (the wire
-        log's Text widget scrolls itself). Windows reports deltas in steps of
-        120; macOS reports small raw deltas, which the old `delta / 120`
-        rounded to 0 -- so take the sign, and the step count when available."""
+        """Scroll the conversation only when the pointer is over it (the network view's
+        Text widget scrolls itself). Windows reports deltas in steps of 120; macOS reports
+        small raw deltas, so take the sign, and the step count when available."""
         widget = self.winfo_containing(event.x_root, event.y_root)
         while widget is not None and widget is not self.bubble_canvas:
             widget = widget.master
@@ -591,80 +670,195 @@ class ChatGUI(tk.Tk):
 
     @staticmethod
     def _rounded_rect_points(x1, y1, x2, y2, r):
-        r = min(r, (x2 - x1) / 2, (y2 - y1) / 2)
-        return [
-            x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
-            x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
-            x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
-        ]
+        return widgets.rounded_rect_points(x1, y1, x2, y2, r)
+
+    @staticmethod
+    def _date_label(ts):
+        day = time.strftime("%Y-%m-%d", time.localtime(ts))
+        today = time.strftime("%Y-%m-%d")
+        yesterday = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+        if day == today:
+            return "Today"
+        if day == yesterday:
+            return "Yesterday"
+        return time.strftime("%a %d %b %Y", time.localtime(ts))
+
+    def _add_item(self, item):
+        self._items.append(item)
+        self._render_item(item)
+
+    def _rerender_items(self):
+        for child in self.bubble_list.winfo_children():
+            child.destroy()
+        self._wrappables = []
+        self.update_idletasks()
+        for item in self._items:
+            self._render_item(item, scroll=False)
+        self._scroll_bubbles_to_bottom()
+
+    def _render_item(self, item, scroll=True):
+        getattr(self, "_draw_" + item["kind"])(item)
+        if scroll:
+            self._scroll_bubbles_to_bottom()
+
+    def _add_message(self, text, align, name, ts, receipt=None, gap=False):
+        """align: 'e' (right, our own messages) or 'w' (left, the peer's)."""
+        ts = float(ts or time.time())
+        label = self._date_label(ts)
+        if label != self._last_date:
+            self._last_date = label
+            self._add_item({"kind": "date", "text": label})
+        self._add_item({"kind": "bubble", "align": align, "name": name, "text": text,
+                        "ts": ts, "receipt": receipt, "gap": gap})
 
     def _add_bubble(self, text, align, bg, fg, timestamp_str, sender=None, receipt=None):
-        """align: 'e' (right, our own messages) or 'w' (left, peer's).
-        `sender`, if given, is drawn as a small accent-colored name line."""
+        """Compatibility wrapper (older call sites): colours now come from the theme."""
+        self._add_message(text, align, sender or self.username or "?", time.time(), receipt)
+
+    def _add_system_notice(self, text, warning=False):
+        """System messages are centred and muted, deliberately NOT styled as a chat turn."""
+        self._add_item({"kind": "notice", "text": text, "warning": warning})
+
+    def _add_blocked_card(self, info, sender=None, ts=None):
+        self._add_item({"kind": "blocked", "info": info, "sender": sender,
+                        "ts": ts or time.time()})
+
+    def _draw_date(self, item):
         t = self.theme
         row = tk.Frame(self.bubble_list, background=t.bg_panel)
-        row.pack(side="top", fill="x", pady=4, padx=10)
+        row.pack(side="top", fill="x", pady=(t.sp("md"), t.sp("xs")))
+        tk.Label(row, text=item["text"], background=t.bg_raised, foreground=t.fg_secondary,
+                 font=t.font("caption_bold"), padx=t.sp("md"), pady=2).pack()
 
-        pad_x, pad_y = 14, 10
-        # Cap bubbles at ~70% of the conversation pane so they never run
-        # past its edge when the pane is narrow.
-        pane_w = self.bubble_canvas.winfo_width()
-        max_width = max(160, min(420, int(pane_w * 0.7) - pad_x * 2))
-        font = (t.ui_font, t.size(10))
-        name_font = (t.ui_font, t.size(9), "bold")
-        time_font = (t.ui_font, t.size(8))
+    def _draw_notice(self, item):
+        t = self.theme
+        row = tk.Frame(self.bubble_list, background=t.bg_panel)
+        row.pack(side="top", fill="x", pady=t.sp("sm"), padx=t.sp("md"))
+        warning = item["warning"]
+        wrap = max(self.bubble_canvas.winfo_width() - 40, 120)
+        label = tk.Label(row, text=item["text"], background=t.bg_panel,
+                         foreground=t.danger if warning else t.fg_secondary,
+                         font=t.font("caption_bold" if warning else "caption"),
+                         wraplength=wrap, justify="center")
+        label.pack(anchor="center")
+        self._wrappables.append((label, 40))
+
+    def _draw_blocked(self, item):
+        """A distinct card for something a real check blocked or flagged: what happened
+        (plain English), and which defence caught it."""
+        t = self.theme
+        info = item["info"]
+        bad = info["severity"] == "bad"
+        color, bg = (t.danger, t.bg_danger_soft) if bad else (t.warning, t.bg_warning_soft)
+        row = tk.Frame(self.bubble_list, background=t.bg_panel)
+        row.pack(side="top", fill="x", pady=t.sp("sm"), padx=t.sp("md"))
+        card = tk.Frame(row, background=bg, highlightbackground=color, highlightcolor=color,
+                        highlightthickness=1)
+        card.pack(fill="x")
+        tk.Frame(card, background=color, width=t.sp(4)).pack(side="left", fill="y")
+        body = tk.Frame(card, background=bg, padx=t.sp("md"), pady=t.sp("sm"))
+        body.pack(side="left", fill="x", expand=True)
+
+        head = tk.Frame(body, background=bg)
+        head.pack(fill="x")
+        size = t.sp(22)
+        badge = tk.Canvas(head, width=size, height=size, background=bg, highlightthickness=0)
+        badge.create_oval(1, 1, size - 1, size - 1, fill=color, outline="")
+        badge.create_text(size / 2, size / 2, text="✕" if bad else "!", fill="#1a0b0b",
+                          font=t.font("caption_bold"))
+        badge.pack(side="left", padx=(0, t.sp("sm")))
+        tk.Label(head, text=info["headline"], background=bg, foreground=color,
+                 font=t.font("body_bold"), anchor="w").pack(side="left", fill="x")
+        if item.get("sender"):
+            tk.Label(head, text=time.strftime("%H:%M", time.localtime(item["ts"])),
+                     background=bg, foreground=t.fg_secondary,
+                     font=t.font("caption")).pack(side="right")
+
+        explain = tk.Label(body, text=info["explain"], background=bg, foreground=t.fg_primary,
+                           font=t.font("body"), justify="left", anchor="w")
+        explain.pack(fill="x", pady=(t.sp("xs"), t.sp("xs")))
+        self._wrappables.append((explain, 90))
+        caught = tk.Frame(body, background=bg)
+        caught.pack(fill="x")
+        tk.Label(caught, text="Caught by", background=bg, foreground=t.fg_secondary,
+                 font=t.font("caption")).pack(side="left", padx=(0, t.sp("sm")))
+        widgets.Chip(caught, t, info["check"], "bad_dark" if bad else "warn_dark").pack(side="left")
+        if info.get("detail"):
+            detail = tk.Label(body, text=str(info["detail"]), background=bg,
+                              foreground=t.fg_hint, font=t.font("mono_small"),
+                              justify="left", anchor="w")
+            detail.pack(fill="x", pady=(t.sp("xs"), 0))
+            self._wrappables.append((detail, 90))
+        w = self.bubble_canvas.winfo_width()
+        for label, margin in self._wrappables[-2:]:
+            label.config(wraplength=max(w - margin, 120))
+
+    def _draw_bubble(self, item):
+        t = self.theme
+        own = item["align"] == "e"
+        gap = item["gap"]
+        row = tk.Frame(self.bubble_list, background=t.bg_panel)
+        row.pack(side="top", fill="x", pady=t.sp("xs"), padx=t.sp("md"))
+        avatar_size = t.sp(32)
+        widgets.Avatar(row, t, item["name"], size=avatar_size).pack(
+            side="right" if own else "left", anchor="n",
+            padx=(t.sp("sm"), 0) if own else (0, t.sp("sm")))
+
+        pad_x, pad_y, line_gap = t.sp("md"), t.sp("sm"), t.sp("xs")
+        pane_w = max(self.bubble_canvas.winfo_width(), 320)
+        max_text = max(150, min(460, int(pane_w * 0.78) - avatar_size - t.sp("sm") - pad_x * 2
+                                - t.sp("md") * 2))
+        fonts = {"body": t.font("body"), "name": t.font("caption_bold"), "time": t.font("caption")}
+        bg = t.bg_bubble_sent if own else t.bg_bubble_recv
+        fg = t.fg_on_sent if own else t.fg_on_recv
+        name_fg = t.fg_on_sent if own else t.accent
+        meta_fg = t.fg_on_sent if own else t.fg_secondary
+        name = "You" if own else item["name"]
+        stamp = time.strftime("%H:%M", time.localtime(item["ts"]))
 
         canvas = tk.Canvas(row, background=t.bg_panel, borderwidth=0, highlightthickness=0)
 
         def measure(**kw):
-            item = canvas.create_text(0, 0, anchor="nw", **kw)
-            x1, y1, x2, y2 = canvas.bbox(item)
-            canvas.delete(item)
+            probe = canvas.create_text(0, 0, anchor="nw", **kw)
+            x1, y1, x2, y2 = canvas.bbox(probe)
+            canvas.delete(probe)
             return x2 - x1, y2 - y1
 
-        # Pass 1: measure everything off-window to size the bubble.
-        text_w, text_h = measure(text=text, font=font, width=max_width)
-        time_w, _ = measure(text=timestamp_str, font=time_font)
-        name_w, name_h = measure(text=sender, font=name_font) if sender else (0, 0)
-        name_gap = name_h + 2 if sender else 0
-
-        bubble_w = max(text_w, time_w, name_w) + pad_x * 2
-        bubble_h = name_gap + text_h + pad_y * 2 + 14  # + room for the timestamp line
+        text_w, text_h = measure(text=item["text"], font=fonts["body"], width=max_text)
+        name_w, name_h = measure(text=name, font=fonts["name"])
+        time_w, time_h = measure(text=stamp, font=fonts["time"])
+        shield = t.sp(14) if item["receipt"] else 0
+        meta_w = time_w + (shield + t.sp("xs") if shield else 0)
+        bubble_w = max(text_w, name_w, meta_w) + pad_x * 2
+        bubble_h = pad_y + name_h + line_gap + text_h + line_gap + time_h + pad_y
         canvas.configure(width=bubble_w, height=bubble_h)
 
-        points = self._rounded_rect_points(1, 1, bubble_w - 1, bubble_h - 1, 14)
-        canvas.create_polygon(points, smooth=True, fill=bg, outline=bg)
-        if sender:
-            canvas.create_text(pad_x, pad_y, text=sender, font=name_font,
-                                fill=t.fg_accent, anchor="nw")
-        canvas.create_text(pad_x, pad_y + name_gap, text=text, font=font, fill=fg,
-                            width=max_width, anchor="nw")
-        canvas.create_text(bubble_w - pad_x, bubble_h - pad_y + 2, text=timestamp_str,
-                            font=time_font, fill=t.fg_secondary if sender else fg,
-                            anchor="se")
+        canvas.create_polygon(self._rounded_rect_points(1, 1, bubble_w - 1, bubble_h - 1, 14),
+                              smooth=True, fill=bg, outline=bg)
+        canvas.create_text(pad_x, pad_y, text=name, font=fonts["name"], fill=name_fg, anchor="nw")
+        canvas.create_text(pad_x, pad_y + name_h + line_gap, text=item["text"],
+                           font=fonts["body"], fill=fg, width=max_text, anchor="nw")
+        meta_y = bubble_h - pad_y
+        right = bubble_w - pad_x
+        if shield:
+            # A shield on every message that passed ALL the client's checks (a gap in the
+            # hash chain is shown amber with "!": the message is authentic but flagged).
+            sx, sy = right - shield / 2, meta_y - time_h / 2
+            fill = (t.warning if gap else ("#d1fae5" if own else t.success))
+            widgets.draw_shield(canvas, sx, sy, shield, fill=fill)
+            if gap:
+                canvas.create_text(sx, sy, text="!", fill="#2b1d00", font=fonts["name"])
+            else:
+                widgets.draw_check(canvas, sx, sy + 1, shield * 0.8,
+                                   "#065f46" if own else "#052e16", width=2)
+            right -= shield + t.sp("xs")
+        canvas.create_text(right, meta_y, text=stamp, font=fonts["time"], fill=meta_fg, anchor="se")
 
-        if receipt:
-            # Stage E: clicking a bubble opens its security receipt.
+        if item["receipt"]:
+            # Clicking a bubble opens its security receipt.
             canvas.configure(cursor="pointinghand" if sys.platform == "darwin" else "hand2")
-            canvas.bind("<Button-1>", lambda _e, r=receipt: self._show_receipt(r))
-        canvas.pack(side="right" if align == "e" else "left")
-        self._scroll_bubbles_to_bottom()
-
-    def _add_system_notice(self, text, warning=False):
-        """System messages are centered, muted, and deliberately NOT styled
-        as a bubble from either side -- they're notices, not chat turns."""
-        t = self.theme
-        row = tk.Frame(self.bubble_list, background=t.bg_panel)
-        row.pack(side="top", fill="x", pady=6, padx=10)
-        color = t.fg_warning if warning else t.fg_secondary
-        weight = "bold" if warning else "normal"
-        wrap = max(self.bubble_canvas.winfo_width() - 40, 120)
-        label = tk.Label(row, text=text, background=t.bg_panel, foreground=color,
-                          font=(t.ui_font, t.size(9), weight), wraplength=wrap,
-                          justify="center")
-        label.pack(anchor="center")
-        self._notice_labels.append(label)
-        self._scroll_bubbles_to_bottom()
+            canvas.bind("<Button-1>", lambda _e, r=item["receipt"]: self._show_receipt(r))
+        canvas.pack(side="right" if own else "left")
 
     def _scroll_bubbles_to_bottom(self):
         self.bubble_list.update_idletasks()
@@ -680,12 +874,16 @@ class ChatGUI(tk.Tk):
         self._chat_ready = True
         self.login_frame.pack_forget()
         self.chat_frame.pack(fill="both", expand=True)
-        # Lay the chat screen out now, so the first notices/bubbles are
-        # sized against the real pane width rather than an unmapped 1px one.
-        # ttk.Panedwindow only applies pane weights on *resize*; the initial
-        # split comes from requested widths, so set the divider explicitly.
+        # Lay the chat screen out now, so the first notices/bubbles are sized against the
+        # real pane width rather than an unmapped 1px one. ttk.Panedwindow only applies
+        # pane weights on *resize*; the initial split comes from requested widths, so set
+        # the divider explicitly. A narrow window starts with the network view hidden
+        # (the conversation needs the room); the header button brings it back.
         self.update_idletasks()
-        self.paned.sashpos(0, int(self.paned.winfo_width() * 0.55))
+        if self._network_visible and self.winfo_width() < NETWORK_MIN_WIDTH:
+            self._toggle_network(False)
+        elif self._network_visible:
+            self.paned.sashpos(0, int(self.paned.winfo_width() * 0.58))
         self.update_idletasks()
         self.message_entry.focus_set()
 
@@ -857,14 +1055,16 @@ class ChatGUI(tk.Tk):
         pair = f"{data['username']}  ↔  {data['peer']}"
         self.header_var.set(pair)
         self.title(f"Secure Chat (GUI) — {pair}")
+        self.peer_label.config(text=data["peer"])
+        self.me_label.config(text=f"You: {data['username']}")
+        self.avatar.set_name(data["peer"])
         self._set_session_state("pending", data["peer"])
         self._show_chat_screen()
         if data.get("own_fingerprint"):
             self._add_system_notice(f"Your key fingerprint: {data['own_fingerprint']}")
         if not data.get("peer_key_found"):
-            # Normal when this side logs in first: the key is fetched again
-            # automatically once the peer joins and starts the handshake (see the
-            # "handshake_waiting" event).
+            # Normal when this side logs in first: the key is fetched again automatically
+            # once the peer joins and starts the handshake (see "handshake_waiting").
             self._add_system_notice(
                 f"{data['peer']} isn't registered or online yet -- the secure "
                 f"session will start automatically when they log in.")
@@ -1051,18 +1251,20 @@ class ChatGUI(tk.Tk):
         self._add_system_notice(
             f"Evidence exported: {rel}\nVerify it independently with:\n"
             f"python tools/verify_transcript.py \"{rel}\"")
-        self._append_wire(f"[evidence] signed evidence file written: {rel}", "info")
+        self._append_wire(f"signed evidence file written: {rel}", "INFO")
 
     # --- sending ---------------------------------------------------------
 
     def _on_send(self):
-        if self.client is None:
+        if self.client is None or not self._session_ready:
             return
-        text = self.message_var.get()
+        text = self.message_entry.get_text()
         if not text.strip():
             return
-        self.message_var.set("")
-        threading.Thread(target=self.client.send_message, args=(text,), daemon=True).start()
+        self.message_entry.set_text("")
+        self._update_send_state()
+        threading.Thread(target=self.client.send_message, args=(text.rstrip("\n"),),
+                         daemon=True).start()
 
     # --- SecureChatClient event hook (background thread!) ---------------
 
@@ -1086,11 +1288,12 @@ class ChatGUI(tk.Tk):
     def _handle_event(self, kind, data):
         if kind == "tls_cert_fingerprint":
             self._append_wire(
-                f"[tls] trusting server cert fingerprint: {data['fingerprint']}", "info")
+                f"trusting server cert fingerprint: {data['fingerprint']}", "TLS")
             self._login_step_event(kind, data)
             return
 
         if kind == "tls_connected":
+            self._tls_text = (data.get("version") or "TLSv1.3").replace("TLSv", "TLS ")
             self._login_step_event(kind, data)
             return
 
@@ -1130,49 +1333,52 @@ class ChatGUI(tk.Tk):
             return
 
         if kind == "envelope_sent":
-            text, is_warning = format_envelope_line("-->", data["envelope"])
-            self._append_wire(text, "warning" if is_warning else "sent")
+            self._append_wire_envelope("→", data["envelope"])
             return
 
         if kind == "envelope_received":
-            text, is_warning = format_envelope_line("<--", data["envelope"])
-            self._append_wire(text, "warning" if is_warning else "recv")
+            self._append_wire_envelope("←", data["envelope"])
             return
 
         if kind == "handshake_started":
-            self._append_wire(f"[handshake] starting ECDH key exchange with {data['peer']}...",
-                               "info")
+            self._append_wire(f"starting ECDH key exchange with {data['peer']}...", "HANDSHAKE")
             return
 
         if kind == "handshake_waiting":
             self._append_wire(
-                f"[handshake] waiting on {data['peer']}'s RSA public key to verify "
-                f"an incoming handshake message...", "info")
+                f"waiting on {data['peer']}'s RSA public key to verify an incoming "
+                f"handshake message...", "HANDSHAKE")
             return
 
         if kind == "handshake_established":
-            self._append_wire(f"[handshake] session key established with {data['peer']} "
-                               f"(ECDH, authenticated by RSA signature)", "info")
+            self._append_wire(f"session key established with {data['peer']} "
+                              f"(ECDH, authenticated by RSA signature)", "HANDSHAKE")
             self._add_system_notice(f"Secure session established with {data['peer']}.")
+            self._session_ready = True
+            self.message_entry.set_placeholder(
+                "Type a message  (Enter sends, Shift+Enter for a new line)")
             self._set_session_state("secure", data["peer"])
             return
 
         if kind == "handshake_aborted":
-            msg = f"[handshake] ABORTED with {data['peer']}: {data['reason']}"
-            self._append_wire(msg, "warning")
-            self._add_system_notice(msg, warning=True)
+            info = describe_rejection("handshake_aborted", data.get("reason"), data.get("reason"))
+            self._append_wire(f"ABORTED with {data['peer']}: {data['reason']}", "ALERT")
+            self._add_blocked_card(info)
+            self._session_ready = False
+            self.message_entry.set_placeholder("No secure session -- sending is disabled")
             self._set_session_state("error", data["peer"], "Handshake aborted -- not secure")
             return
 
         if kind == "peer_fingerprint":
-            fp = data["fingerprint"]
-            self.fp_label.config(text=f"{data['peer']}'s fingerprint: {fp}")
-            self._append_wire(f"[handshake] {data['peer']}'s RSA key fingerprint: {fp}", "info")
+            self._peer_fingerprint = data["fingerprint"]
+            self.fp_chip.set("info" if self._session_ready else "warn",
+                             self._fingerprint_chip_text())
+            self._append_wire(f"{data['peer']}'s RSA key fingerprint: {data['fingerprint']}",
+                              "HANDSHAKE")
             return
 
         if kind == "message_sent":
-            self._add_bubble(data["message"], "e", self.theme.bg_bubble_sent,
-                              self.theme.fg_on_sent, time.strftime("%H:%M"),
+            self._add_message(data["message"], "e", self.username, data.get("timestamp"),
                               receipt=data.get("receipt"))
             return
 
@@ -1182,24 +1388,18 @@ class ChatGUI(tk.Tk):
             return
 
         if kind == "message_received":
-            self._add_bubble(data["message"], "w",
-                              self.theme.bg_bubble_recv, self.theme.fg_on_recv,
-                              time.strftime("%H:%M"), sender=data["sender"],
-                              receipt=data.get("receipt"))
+            receipt = data.get("receipt") or {}
+            self._add_message(data["message"], "w", data["sender"], data.get("timestamp"),
+                              receipt=data.get("receipt"), gap=receipt.get("chain_link") == "gap")
             return
 
-        if kind == "message_rejected":
-            msg = f"REJECTED message from {data['sender']}: {data['detail']}"
-            self._add_system_notice(msg, warning=True)
-            self._append_wire(f"[!] {msg}", "warning")
-            return
-
-        if kind == "chain_warning":
-            # Authentic message(s) are missing before one that DID arrive:
-            # the message is still shown, but this is a security event.
-            msg = f"CHAIN WARNING from {data['sender']}: {data['detail']}"
-            self._add_system_notice(msg, warning=True)
-            self._append_wire(f"[!] {msg}", "warning")
+        if kind in ("message_rejected", "chain_warning"):
+            # Both come straight from the client's real checks. A rejected message was
+            # NOT displayed; a chain warning (gap) accompanies a message that was.
+            info = describe_rejection(kind, data.get("reason"), data.get("detail"))
+            self._add_blocked_card(info, sender=data.get("sender"))
+            self._append_wire(f"{info['headline']} (from {data.get('sender')}): "
+                              f"{data.get('detail')}", "ALERT")
             return
 
         if kind == "system_message":
@@ -1208,21 +1408,32 @@ class ChatGUI(tk.Tk):
 
         if kind == "disconnected":
             reason = data.get("reason", "")
+            self._session_ready = False
             self._set_session_state("error", self.peer,
                                     f"Disconnected from server ({reason}) -- restart to reconnect")
             self._add_system_notice("Disconnected from server.", warning=True)
+            self.message_entry.set_placeholder("Disconnected")
             self.send_button.config(state="disabled")
-            self.message_entry.config(state="disabled")
             return
 
-    # --- wire log helper ---------------------------------------------------
+    # --- network view helper ---------------------------------------------------
 
-    def _append_wire(self, line, tag=None):
-        timestamp = time.strftime("%H:%M:%S")
-        self.wire_text.config(state="normal")
-        self.wire_text.insert("end", f"[{timestamp}] {line}\n", (tag,) if tag else ())
-        self.wire_text.see("end")
-        self.wire_text.config(state="disabled")
+    def _append_wire(self, text, kind="INFO"):
+        """One line in the network view: time, a coloured badge for the kind of traffic
+        (TLS / HANDSHAKE / CHAT / ALERT / AUTH), then the (shortened) content."""
+        kind = {"info": "INFO", "sent": "CHAT", "recv": "CHAT", "warning": "ALERT"}.get(kind, kind)
+        w = self.wire_text
+        w.config(state="normal")
+        w.insert("end", time.strftime("%H:%M:%S") + "  ", ("ts",))
+        w.insert("end", f"{kind:<9}", (f"badge_{kind}",))
+        w.insert("end", f" {text}\n", (f"body_{kind}",))
+        w.see("end")
+        w.config(state="disabled")
+
+    def _append_wire_envelope(self, arrow, envelope):
+        text, is_warning = format_envelope_line("-->" if arrow == "→" else "<--", envelope)
+        kind = "ALERT" if is_warning and wire_kind(envelope) != "AUTH" else wire_kind(envelope)
+        self._append_wire(text.replace("-->", arrow, 1).replace("<--", arrow, 1), kind)
 
     # --- shutdown ----------------------------------------------------------
 
