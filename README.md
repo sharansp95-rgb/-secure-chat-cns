@@ -234,6 +234,28 @@ five minutes lock that account with exponential backoff (30s, 60s, 120s, ... cap
 A locked login is rejected *before* PBKDF2 ever runs (see `server/lockout.py`), so this
 cannot be used to burn CPU against an account that's already locked.
 
+## Evaluation results
+
+Measured, not claimed: `tools/evaluate_security.py` drives the real code against a local lab-mode server
+(temporary data, logs and exports; your real `data/` is never touched) and writes
+[`docs/evaluation_results.md`](docs/evaluation_results.md) (all tables, parameters, machine) and
+`docs/evaluation_results.json` (raw numbers). Reproduce: `python tools/evaluate_security.py` (about a minute;
+`--quick` for a short run). Headline numbers from an Apple M2, Python 3.12, loopback:
+
+| Measure | Result |
+|---|---|
+| Test suite | 160 / 160 pass |
+| Attacks detected (tamper, replay, drop, MITM key swap, edited evidence, wrong-password burst; 20 each) | 120 / 120 (100%) |
+| False rejections on 200 normal messages | 0 (0.0%) |
+| End-to-end message latency through the real TLS server | median 1.2 ms, p95 1.3 ms |
+| Full session setup (TLS + login + signed handshake) | median 44.8 ms, p95 46.3 ms |
+| Review 1 requirement, encryption overhead < 1 s | PASS (every p95 is far below 1 s) |
+
+Limits: one machine over loopback (no network delay); small fixed attack counts show the checks work on
+these attacks, not that no attack could evade them.
+
+![Evaluation summary](docs/screenshots/10_evaluation_results.png)
+
 ## Running the tests
 
 ```
