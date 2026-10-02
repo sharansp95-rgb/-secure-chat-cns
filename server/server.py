@@ -68,6 +68,7 @@ from crypto_engine.signatures import generate_keypair as generate_rsa_keypair  #
 from crypto_engine.signatures import sign  # noqa: E402
 from server.lockout import LockoutGuard  # noqa: E402
 from server.security_log import log_event  # noqa: E402
+from transport import LockedTLSSocket  # noqa: E402
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5000
@@ -163,6 +164,13 @@ class ChatServer:
         # route/broadcast.
         self.clients = {}
         self._lock = threading.Lock()
+
+        # Listening socket + lifecycle (see listen()/shutdown()). `_open_conns`
+        # tracks EVERY accepted TLS connection (not just authenticated ones in
+        # self.clients) so shutdown() can force them all closed.
+        self._srv = None
+        self._stop = threading.Event()
+        self._open_conns = set()
 
         # Stage C lab state, all guarded by _lab_lock (separate from _lock,
         # which is purely about self.clients, to avoid widening that lock's
@@ -563,34 +571,84 @@ class ChatServer:
             except OSError:
                 pass
             return
-        self.handle_client(tls_conn, addr)
+        # One handler thread reads this connection while other handler
+        # threads route()/broadcast into it -- see transport/locked_tls.py.
+        safe_conn = LockedTLSSocket(tls_conn)
+        with self._lock:
+            self._open_conns.add(safe_conn)
+        try:
+            self.handle_client(safe_conn, addr)
+        finally:
+            with self._lock:
+                self._open_conns.discard(safe_conn)
 
-    def serve_forever(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+    def listen(self):
+        """Bind and start listening, then return the real port. Idempotent.
+
+        Pass port=0 to let the OS pick a free port (read it back from the
+        return value or self.port): there is no window between "find a free
+        port" and "bind it" for another process to steal it, unlike the old
+        free_port()-then-bind dance. Because the socket is already listening
+        when this returns, a client may connect immediately -- callers need no
+        "wait until the port accepts connections" polling (whose raw probe
+        connections also just generated spurious TLS-handshake failures)."""
+        if self._srv is not None:
+            return self.port
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             srv.bind((self.host, self.port))
             srv.listen()
-            print(f"[*] Server listening on {self.host}:{self.port} over TLS "
-                  f"(cert fingerprint: {self.cert_fingerprint}) "
-                  f"(routes handshake/chat envelopes; never sees plaintext app "
-                  f"secrets or session keys)")
-            if self.lab_mode:
-                print("[*] LAB MODE ENABLED -- localhost, authenticated clients may arm "
-                      "one-shot relay attacks via lab_control. Never enable this on a "
-                      "server reachable from anywhere but localhost.")
-            try:
-                while True:
+        except OSError:
+            srv.close()
+            raise
+        self.port = srv.getsockname()[1]
+        self._srv = srv
+        return self.port
+
+    def shutdown(self):
+        """Ask serve_forever() to return, and force every open connection
+        closed. Safe to call more than once, from any thread."""
+        self._stop.set()
+        with self._lock:
+            conns = list(self._open_conns)
+        for conn in conns:
+            conn.close()
+
+    def serve_forever(self):
+        self.listen()
+        srv = self._srv
+        srv.settimeout(0.2)  # so shutdown() is noticed promptly
+        print(f"[*] Server listening on {self.host}:{self.port} over TLS "
+              f"(cert fingerprint: {self.cert_fingerprint}) "
+              f"(routes handshake/chat envelopes; never sees plaintext app "
+              f"secrets or session keys)")
+        if self.lab_mode:
+            print("[*] LAB MODE ENABLED -- localhost, authenticated clients may arm "
+                  "one-shot relay attacks via lab_control. Never enable this on a "
+                  "server reachable from anywhere but localhost.")
+        try:
+            while not self._stop.is_set():
+                try:
                     conn, addr = srv.accept()
-                    threading.Thread(
-                        target=self._handle_raw_connection, args=(conn, addr), daemon=True
-                    ).start()
-            except KeyboardInterrupt:
-                print("\n[*] Shutting down")
-            finally:
-                with self._lock:
-                    conns = list(self.clients.values())
-                for conn in conns:
-                    self.remove_client(conn)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break  # listening socket closed
+                threading.Thread(
+                    target=self._handle_raw_connection, args=(conn, addr), daemon=True
+                ).start()
+        except KeyboardInterrupt:
+            print("\n[*] Shutting down")
+        finally:
+            self._stop.set()
+            srv.close()
+            self._srv = None
+            self.shutdown()
+            with self._lock:
+                conns = list(self.clients.values())
+            for conn in conns:
+                self.remove_client(conn)
 
 
 def main():

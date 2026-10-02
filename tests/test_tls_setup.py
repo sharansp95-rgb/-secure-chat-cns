@@ -20,8 +20,6 @@ import os
 import socket
 import ssl
 import sys
-import threading
-import time
 import uuid
 
 import pytest
@@ -29,26 +27,9 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from certs.generate_certs import generate as generate_certs  # noqa: E402
-from server.server import ChatServer  # noqa: E402
+from conftest import wait_until_offline  # noqa: E402
 
 HOST = "127.0.0.1"
-
-
-def _free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((HOST, 0))
-        return s.getsockname()[1]
-
-
-def _wait_for_port(host, port, timeout=5):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            with socket.create_connection((host, port), timeout=0.2):
-                return True
-        except OSError:
-            time.sleep(0.05)
-    return False
 
 
 @pytest.fixture()
@@ -74,15 +55,13 @@ def certs(tmp_path):
 
 
 @pytest.fixture()
-def running_server(certs):
+def running_server(certs, net):
+    """A real TLS ChatServer using this test's own generated cert, on an
+    OS-chosen port, already listening and shut down again after the test
+    (see tests/conftest.py)."""
     key_path, cert_path = certs
-    port = _free_port()
-    server = ChatServer(HOST, port, certfile=cert_path, keyfile=key_path)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    assert _wait_for_port(HOST, port), "test server never started listening"
-    yield server, HOST, port, cert_path
-    # Daemon thread; process teardown handles cleanup for these short tests.
+    server, host, port = net.start_server(certfile=cert_path, keyfile=key_path)
+    return server, host, port, cert_path
 
 
 def _tls_client_socket(host, port, cafile):
@@ -98,9 +77,8 @@ def _tls_client_socket(host, port, cafile):
 
 def test_tls_client_register_login_round_trip(running_server):
     _, host, port, cert_path = running_server
-    # Unique per run: server.py's user store is a real, persistent local
-    # file (data/users.json), not test-isolated by path, so a fixed
-    # username would collide with a leftover account from a previous run.
+    # The user store is isolated per test (see tests/conftest.py), so no
+    # leftover account can collide; the unique name is just belt and braces.
     username = f"tls_test_user_{uuid.uuid4().hex[:8]}"
     sock = _tls_client_socket(host, port, cert_path)
     try:
@@ -120,7 +98,7 @@ def test_tls_client_register_login_round_trip(running_server):
 
 
 def test_tls_client_wrong_password_login_rejected(running_server):
-    _, host, port, cert_path = running_server
+    server, host, port, cert_path = running_server
     username = f"tls_test_user_{uuid.uuid4().hex[:8]}"
     sock = _tls_client_socket(host, port, cert_path)
     try:
@@ -131,6 +109,10 @@ def test_tls_client_wrong_password_login_rejected(running_server):
             json.loads(stream.readline())  # register_result
     finally:
         sock.close()
+    # The first connection must be fully gone from the roster before the
+    # second one logs in, or the server answers "already logged in
+    # elsewhere" and the wrong-password path is never actually exercised.
+    wait_until_offline(server, username)
 
     sock2 = _tls_client_socket(host, port, cert_path)
     try:
@@ -141,6 +123,7 @@ def test_tls_client_wrong_password_login_rejected(running_server):
             result = json.loads(stream.readline())
             assert result["type"] == "login_result"
             assert result["success"] is False
+            assert result["reason"] == "invalid username or password"
     finally:
         sock2.close()
 

@@ -116,6 +116,7 @@ from crypto_engine.hash_chain import (  # noqa: E402
 from crypto_engine.signatures import deserialize_public_key, fingerprint  # noqa: E402
 from crypto_engine.signatures import generate_keypair as generate_rsa_keypair  # noqa: E402
 from crypto_engine.signatures import serialize_public_key, sign, verify  # noqa: E402
+from transport import LockedTLSSocket  # noqa: E402
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5000
@@ -231,9 +232,11 @@ def connect_tls(host, port, cafile=DEFAULT_CAFILE, server_hostname="localhost",
             f"({exc or 'timed out'}). Is the chat server running on this port? "
             f"(On macOS, port 5000 can be taken by AirPlay Receiver.)"
         ) from exc
-    # Back to blocking mode: receive_loop waits indefinitely for messages.
+    # receive_loop reads on one thread while other threads write, so hand
+    # back the thread-safe wrapper (see transport/locked_tls.py) -- a bare
+    # SSLSocket must never be shared across threads like that.
     tls_sock.settimeout(None)
-    return tls_sock
+    return LockedTLSSocket(tls_sock)
 
 
 def b64(data):
