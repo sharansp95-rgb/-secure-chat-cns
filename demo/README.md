@@ -19,6 +19,7 @@ python demo/run_replay_demo.py
 python demo/run_mitm_handshake_demo.py
 python demo/run_drop_demo.py
 python demo/run_evidence_demo.py
+python demo/run_wireshark_demo.py   # needs Wireshark/tshark installed
 ```
 
 | Script | What it proves |
@@ -37,6 +38,42 @@ the very first packet (two TLS 1.3 handshakes, so the handshake is visible), fol
 [`capture_instructions.md`](capture_instructions.md), which also documents the exact
 filter and steps to produce your own capture, e.g. a longer one.
 
+## Scripted Wireshark capture (`run_wireshark_demo.py`)
+
+Generates a fresh, fully scripted capture and checks it for you:
+
+```
+python demo/run_wireshark_demo.py                    # capture + analysis in the terminal
+python demo/run_wireshark_demo.py --open-wireshark   # ...and open the result in Wireshark
+python demo/run_wireshark_demo.py --output my_capture.pcapng   # write the capture elsewhere
+```
+
+What it does: starts a real relay on a **spare ephemeral port**, starts a `tshark` loopback
+capture for that port, registers two demo users, runs the signed ECDH handshake, exchanges five
+chat messages, stops the capture and analyses it. It uses a **temporary data directory**
+(user store, keys, security log), deleted afterwards, so your real `data/` and `logs/` are never
+touched. Needs Wireshark installed (it uses the bundled `tshark`) and permission to capture on
+loopback (the same one Wireshark's live capture needs).
+
+Expected output (packet counts vary slightly per run):
+
+```
+Captured 84 packets
+Client Hellos: 2   TLS 1.3 Server Hellos: 2
+Encrypted Application Data records: 36
+Plaintext scan of the raw capture: 18 strings searched (usernames, password, message text, JSON field names)
+None of them appear anywhere in the capture bytes -- all data is TLS-encrypted!
+```
+
+The script exits non-zero if the TLS 1.3 handshake is missing or any of the 18 strings appears
+in the raw bytes. The capture is written to `demo/wireshark_capture.pcapng` and overwritten on
+each run; it is a scratch file, not committed (the committed evidence is
+`capture_normal_session.pcapng`). `--open-wireshark` opens it with the port already decoded as TLS and the filter set to `tls`.
+To open it by hand, decode the printed port as TLS (Analyze, Decode As, or
+`wireshark -d tcp.port==PORT,tls -r demo/wireshark_capture.pcapng`) and filter `tls`. Screenshots of such a capture:
+[`12`](../docs/screenshots/12_wireshark_tls13_packets.png) and
+[`13`](../docs/screenshots/13_wireshark_hex_ciphertext.png).
+
 ## Reproducing everything from scratch
 
 ```
@@ -47,4 +84,5 @@ python demo/run_replay_demo.py
 python demo/run_mitm_handshake_demo.py
 python demo/run_drop_demo.py
 python demo/run_evidence_demo.py
+python demo/run_wireshark_demo.py   # needs Wireshark/tshark installed
 ```

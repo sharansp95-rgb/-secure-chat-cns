@@ -258,6 +258,27 @@ counts show the checks work on these attacks, not that no attack could evade the
 
 ![Evaluation summary](docs/screenshots/10_evaluation_results.png)
 
+## Screenshots
+
+Every file in [`docs/screenshots/`](docs/screenshots/), in demo order. (There is no `11`; the numbering
+skips it.)
+
+| # | File | What it shows |
+|---|---|---|
+| 01 | [`01_overview_two_chats_and_dashboard.png`](docs/screenshots/01_overview_two_chats_and_dashboard.png) | The whole demo at a glance: sender and receiver chat windows plus the Security Dashboard. |
+| 02 | [`02_security_receipt.png`](docs/screenshots/02_security_receipt.png) | A message's per-message security receipt: encrypted, signed, chained and fresh. |
+| 03 | [`03_attack_lab_panel.png`](docs/screenshots/03_attack_lab_panel.png) | The Attack Lab panel (amber LAB MODE) with the one-shot relay attacks: tamper, replay, drop, MITM. |
+| 04 | [`04_tamper_caught.png`](docs/screenshots/04_tamper_caught.png) | A tampered message rejected by the receiver (AES-GCM tag check failed); nothing is displayed. |
+| 05 | [`05_dashboard_after_attacks.png`](docs/screenshots/05_dashboard_after_attacks.png) | The Security Dashboard's event feed and counters after the Attack Lab attacks. |
+| 06a | [`06a_lockout_message.png`](docs/screenshots/06a_lockout_message.png) | The login screen after repeated wrong passwords: the account is temporarily locked. |
+| 06b | [`06b_lockout_dashboard.png`](docs/screenshots/06b_lockout_dashboard.png) | The same lockout on the dashboard: failed-login events and the "Locked accounts" panel with the time remaining. |
+| 07 | [`07_evidence_valid.png`](docs/screenshots/07_evidence_valid.png) | An exported evidence file checked by the independent verifier: RESULT VALID. |
+| 08 | [`08_evidence_invalid.png`](docs/screenshots/08_evidence_invalid.png) | The same file after one word is edited: RESULT INVALID, naming the exact record and failed check. |
+| 09 | [`09_server_and_tls_fingerprint.png`](docs/screenshots/09_server_and_tls_fingerprint.png) | The server terminal listening over TLS, with the certificate fingerprint clients pin. |
+| 10 | [`10_evaluation_results.png`](docs/screenshots/10_evaluation_results.png) | Terminal summary of `tools/evaluate_security.py`: tests, attack detection, false rejections, timings. |
+| 12 | [`12_wireshark_tls13_packets.png`](docs/screenshots/12_wireshark_tls13_packets.png) | Wireshark packet list from `demo/run_wireshark_demo.py`: Client Hello and Server Hello labelled TLSv1.3, then only Application Data. |
+| 13 | [`13_wireshark_hex_ciphertext.png`](docs/screenshots/13_wireshark_hex_ciphertext.png) | One Application Data packet selected: the hex/ASCII pane is unreadable ciphertext, with no usernames, passwords or message text. |
+
 ## Running the tests
 
 ```

@@ -289,6 +289,18 @@ the `lab_attack_performed` and `security_alert` counters climbing — and say:
 
 Skip this step if short on time; it's a supplement to the live demo, not required.
 
+**Fresh capture instead (optional):** `python demo/run_wireshark_demo.py --open-wireshark`
+generates a brand-new capture and opens it. It runs a scripted alice/bob session on a **spare
+port** with a **temporary data directory** (your real `data/` is not touched), then prints
+what it found. Expect: `Client Hellos: 2   TLS 1.3 Server Hellos: 2`, about 36 `Encrypted
+Application Data records`, and `None of them appear anywhere in the capture bytes` after
+searching the raw capture for the usernames, password, message text and JSON field names.
+With `--open-wireshark` the port is already decoded as TLS and the filter is `tls`; if you open
+the file by hand, use the port it prints: **Decode As… → TCP port → TLS**, then filter `tls`. Output file:
+`demo/wireshark_capture.pcapng` (scratch, overwritten each run). Details in
+[`README.md`](README.md#scripted-wireshark-capture-run_wireshark_demopy). The steps below use
+the committed capture, which works identically.
+
 **7.1** Open Wireshark. **File → Open...**, navigate to and select
 `demo/capture_normal_session.pcapng`, click **Open**.
 

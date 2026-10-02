@@ -256,17 +256,19 @@ def analyze_capture(capture_file, port, needles=()):
     return problems
 
 
-def open_in_wireshark(capture_file):
-    """Open the capture file in Wireshark GUI."""
+def open_in_wireshark(capture_file, port):
+    """Open the capture in the Wireshark GUI with the demo port decoded as TLS and
+    the display filter set to `tls` (a random port would otherwise be shown as plain TCP)."""
     ws = find_wireshark()
     if not ws:
         print("[!] Wireshark GUI not found, skipping open")
         return
+    args = ["-d", f"tcp.port=={port},tls", "-Y", "tls", "-r", capture_file]
     if ws.endswith(".app"):
-        subprocess.Popen(["open", "-a", ws, capture_file])
+        subprocess.Popen(["open", "-n", "-a", ws, "--args"] + args)
     else:
-        subprocess.Popen([ws, capture_file])
-    print(f"[*] Opened {capture_file} in Wireshark")
+        subprocess.Popen([ws] + args)
+    print(f"[*] Opened {capture_file} in Wireshark (port {port} decoded as TLS, filter: tls)")
 
 
 def main():
@@ -385,7 +387,7 @@ def main():
 
     # ── Open in Wireshark ──
     if args.open_wireshark:
-        open_in_wireshark(args.output)
+        open_in_wireshark(args.output, port)
 
     if problems:
         print(f"\n[!] CHECKS FAILED: {problems}")
