@@ -268,16 +268,17 @@ class ChatGUI(tk.Tk):
         frame = tk.Frame(self, background=t.bg_app)
         self.chat_frame = frame
 
-        # -- top bar: identity + session status (left), fingerprint strip (right) --
+        # -- top bar, two rows. Row 1: identity (left) + fingerprint strip
+        # (right). Row 2: session status (left) + action buttons (right).
+        # They used to share ONE row, where the long status text plus the
+        # large fingerprint banner used up the whole width and the right-packed
+        # Export Evidence / Attack Lab buttons were clipped to nothing at the
+        # default window size.
         top = tk.Frame(frame, background=t.bg_panel, padx=16, pady=10)
         top.pack(side="top", fill="x")
-        identity = tk.Frame(top, background=t.bg_panel)
-        identity.pack(side="left", anchor="w")
         self.header_var = tk.StringVar(value="")
-        ttk.Label(identity, textvariable=self.header_var, style="Header.TLabel").pack(anchor="w")
-        self.session_status = tk.Label(identity, text="", background=t.bg_panel,
-                                        font=(t.ui_font, t.size(9)))
-        self.session_status.pack(anchor="w", pady=(2, 0))
+        ttk.Label(top, textvariable=self.header_var, style="Header.TLabel").pack(
+            side="left", anchor="w")
 
         self.fp_strip = tk.Frame(top, background=t.bg_pending, padx=12, pady=6)
         self.fp_strip.pack(side="right")
@@ -285,18 +286,24 @@ class ChatGUI(tk.Tk):
                                   font=(t.mono_font, t.size(12), "bold"))
         self.fp_label.pack()
 
+        status_row = tk.Frame(frame, background=t.bg_panel, padx=16)
+        status_row.pack(side="top", fill="x")
+        self.session_status = tk.Label(status_row, text="", background=t.bg_panel,
+                                        font=(t.ui_font, t.size(9)))
+        self.session_status.pack(side="left", anchor="w", pady=(0, 10))
+
         # Stage B: write a signed evidence file for this session.
-        self.export_button = ttk.Button(top, text="Export Evidence",
+        self.export_button = ttk.Button(status_row, text="Export Evidence",
                                          command=self._on_export_evidence)
-        self.export_button.pack(side="right", padx=(0, 12))
+        self.export_button.pack(side="right", pady=(0, 10))
 
         # Stage C: only enabled once the connected server reports lab_mode
         # (see _handle_event's "auth_success" case) -- a server not started
         # with --lab rejects lab_control anyway, but disabling the button is
         # the honest UI: there is nothing this client could do.
-        self.lab_button = ttk.Button(top, text="Attack Lab", style="Lab.TButton",
+        self.lab_button = ttk.Button(status_row, text="Attack Lab", style="Lab.TButton",
                                      command=self._open_attack_lab, state="disabled")
-        self.lab_button.pack(side="right", padx=(0, 8))
+        self.lab_button.pack(side="right", padx=(0, 8), pady=(0, 10))
 
         # -- split pane: bubble conversation (left) / wire log (right) --
         paned = ttk.Panedwindow(frame, orient="horizontal")
