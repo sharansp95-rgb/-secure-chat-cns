@@ -66,8 +66,17 @@ from certs.generate_certs import cert_fingerprint_from_file  # noqa: E402
 from crypto_engine.dh_exchange import generate_keypair as generate_ecdh_keypair  # noqa: E402
 from crypto_engine.signatures import generate_keypair as generate_rsa_keypair  # noqa: E402
 from crypto_engine.signatures import sign  # noqa: E402
-from server.lockout import LockoutGuard  # noqa: E402
-from server.security_log import log_event  # noqa: E402
+# Same dual-mode import as user_store above: run as a script
+# (`python server/server.py`, the documented way) the server/ directory is on
+# sys.path and `import server` would find THIS FILE rather than the package,
+# so the sibling modules must be imported top-level there; imported as part
+# of the `server` package (tests, demos) they come from the package.
+try:
+    from lockout import LockoutGuard
+    from security_log import log_event
+except ImportError:
+    from server.lockout import LockoutGuard  # noqa: E402
+    from server.security_log import log_event  # noqa: E402
 from transport import LockedTLSSocket  # noqa: E402
 
 DEFAULT_HOST = "127.0.0.1"
