@@ -26,10 +26,8 @@ What this does:
 """
 
 import argparse
-import functools
 import os
 import shutil
-import tempfile
 import signal
 import subprocess
 import sys
@@ -40,8 +38,6 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 import demo._demo_common as demo_common
-import server.security_log as security_log
-import server.server as server_module
 from demo._demo_common import (
     DEMO_PASSWORD,
     banner,
@@ -70,22 +66,6 @@ CAPTURE_FILE = os.path.join(PROJECT_ROOT, "demo", "wireshark_capture.pcapng")
 
 # macOS loopback interface
 LOOPBACK_IFACE = "lo0"
-
-
-def isolate_state():
-    """Point the relay's user store, the security log and the client key store at a
-    throwaway directory, so this script never adds accounts to (or writes into) the
-    real data/ and logs/. Returns the directory; the caller deletes it."""
-    root = tempfile.mkdtemp(prefix="securechat_wireshark_demo_")
-    store = os.path.join(root, "users.json")
-    keys_dir = os.path.join(root, "keys")
-    log_path = os.path.join(root, "security_events.jsonl")
-    for name in ("register_user", "verify_user", "get_public_key"):
-        setattr(server_module, name, functools.partial(getattr(server_module, name), path=store))
-    real_log_event = security_log.log_event
-    server_module.log_event = lambda event, **fields: real_log_event(event, path=log_path, **fields)
-    demo_common.save_private_key = functools.partial(demo_common.save_private_key, keys_dir=keys_dir)
-    return root
 
 
 def plaintext_scan(capture_file, needles):
@@ -289,7 +269,7 @@ def main():
     print("  6. Stop capture and analyze the traffic")
     print()
 
-    state_dir = isolate_state()
+    state_dir = demo_common.isolate_demo_state()
     print(f"[*] Using a temporary data directory (deleted at the end): {state_dir}")
 
     # ── Step 1: Start server ──
@@ -383,7 +363,6 @@ def main():
         print("    This usually means tshark couldn't capture on the loopback interface.")
         print("    Try: sudo python demo/run_wireshark_demo.py")
 
-    shutil.rmtree(state_dir, ignore_errors=True)
 
     # ── Open in Wireshark ──
     if args.open_wireshark:

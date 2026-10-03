@@ -31,6 +31,7 @@ import sys
 import time
 
 from _demo_common import (
+    isolate_demo_state,
     banner,
     check,
     demo_username,
@@ -80,6 +81,7 @@ class _MitmRelay(ChatServer):
 
 
 def main():
+    isolate_demo_state()   # temp user store / keys / log / exports: never your real data/
     banner("DEMO 3: Signed handshake stops a relay-server MITM")
 
     attacker_priv, attacker_pub = generate_keypair()  # attacker never registers this key

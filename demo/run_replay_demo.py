@@ -24,6 +24,7 @@ import sys
 import time
 
 from _demo_common import (
+    isolate_demo_state,
     banner,
     check,
     demo_username,
@@ -60,6 +61,7 @@ class _ReplayingRelay(ChatServer):
 
 
 def main():
+    isolate_demo_state()   # temp user store / keys / log / exports: never your real data/
     banner("DEMO 2: Replay protection (relay resends a captured message)")
 
     try:

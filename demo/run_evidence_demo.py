@@ -25,6 +25,8 @@ import sys
 import time
 
 from _demo_common import (
+    demo_export_dir,
+    isolate_demo_state,
     PROJECT_ROOT,
     banner,
     check,
@@ -36,7 +38,6 @@ from _demo_common import (
 )
 
 VERIFIER = os.path.join(PROJECT_ROOT, "tools", "verify_transcript.py")
-EXPORT_DIR = os.path.join(PROJECT_ROOT, "exports")
 
 
 def run_verifier(path, *extra):
@@ -47,6 +48,7 @@ def run_verifier(path, *extra):
 
 
 def main():
+    isolate_demo_state()   # temp user store / keys / log / exports: never your real data/
     banner("DEMO 5: signed evidence export + independent offline verifier")
 
     _, host, port = start_mini_relay()
@@ -73,7 +75,7 @@ def main():
     run_step("STEP 1: a short real conversation (4 messages, both directions)", converse)
 
     def export():
-        path = bob.export_evidence(EXPORT_DIR)
+        path = bob.export_evidence(demo_export_dir())
         print(f"[*] {bob_name} exported signed evidence to: "
               f"{os.path.relpath(path, PROJECT_ROOT)}")
         return path

@@ -35,6 +35,51 @@ from server.server import CertsMissingError, ChatServer  # noqa: E402
 DEMO_PASSWORD = "Demo-Password-1234!"
 
 
+_DEMO_STATE = None     # the temporary directory while isolation is active
+
+
+def isolate_demo_state():
+    """Point every demo at a THROWAWAY user store, key directory, security log and exports
+    folder, so a demo script never adds accounts to, or writes into, your real data/, logs/
+    or exports/ (the live GUI demo, demo/start_demo.sh, is what uses those). The directory is
+    created once per process and removed at exit. Returns its path. Safe to call repeatedly.
+
+    Set SECURECHAT_DEMO_REAL_DATA=1 to opt out (not recommended)."""
+    global _DEMO_STATE, save_private_key
+    if _DEMO_STATE is not None or os.environ.get("SECURECHAT_DEMO_REAL_DATA") == "1":
+        return _DEMO_STATE
+    import atexit
+    import functools
+    import shutil
+    import tempfile
+
+    import client.client as client_module
+    import client.evidence as evidence_module
+    import server.security_log as security_log
+    import server.server as server_module
+
+    root = tempfile.mkdtemp(prefix="securechat_demo_")
+    store = os.path.join(root, "users.json")
+    keys_dir = os.path.join(root, "keys")
+    log_path = os.path.join(root, "security_events.jsonl")
+    for name in ("register_user", "verify_user", "get_public_key"):
+        setattr(server_module, name, functools.partial(getattr(server_module, name), path=store))
+    real_log_event = security_log.log_event
+    server_module.log_event = lambda event, **fields: real_log_event(event, path=log_path, **fields)
+    save_private_key = functools.partial(save_private_key, keys_dir=keys_dir)
+    client_module.save_private_key = save_private_key
+    evidence_module.DEFAULT_EXPORT_DIR = os.path.join(root, "exports")
+    _DEMO_STATE = root
+    atexit.register(shutil.rmtree, root, ignore_errors=True)
+    return root
+
+
+def demo_export_dir():
+    """Where a demo should write evidence files: the temp exports folder once isolated."""
+    import client.evidence as evidence_module
+    return evidence_module.DEFAULT_EXPORT_DIR
+
+
 class Tee(io.TextIOBase):
     """Writes to both the real terminal and an in-memory buffer, so a demo
     step's narration is visible live (for the audience) while also being

@@ -6,7 +6,7 @@
 >
 > | Measured (see [Evaluation results](#evaluation-results)) | |
 > |---|---|
-> | Automated tests | **337 passing** |
+> | Automated tests | **348 passing** |
 > | Attacks detected (tamper, replay, drop, MITM, edited evidence, password burst; 20 each) | **120 / 120**, 0 false rejections in 200 normal messages |
 > | End-to-end message latency (real TLS server, loopback) | **~1.2 ms** median (requirement: < 1 s) |
 >
@@ -31,7 +31,7 @@ to broker keys), derives a fresh AES-256-GCM session key, signs and encrypts eve
 message with it, wraps the whole client↔server connection in TLS, gates every
 connection behind a PBKDF2-hashed login, rejects replayed or tampered messages, detects
 a relay dropping or reordering messages via a hash-chained conversation log, and locks
-out repeated failed logins — all properties backed by 337 automated tests and five
+out repeated failed logins — all properties backed by 348 automated tests and five
 live attack-and-defense demo scripts, plus a Tkinter GUI whose "Wire Log" panel makes
 the cryptography visible during a demo instead of invisible, an opt-in **Attack Lab**
 that triggers those same attacks for real with one click, and a live **Security
@@ -266,7 +266,7 @@ Measured, not claimed: `tools/evaluate_security.py` drives the real code against
 
 | Measure | Result |
 |---|---|
-| Test suite | 337 / 337 pass |
+| Test suite | 348 / 348 pass |
 | Attacks detected (tamper, replay, drop, MITM key swap, edited evidence, wrong-password burst; 20 each) | 120 / 120 (100%) |
 | False rejections on 200 normal messages | 0 (0.0%) |
 | End-to-end message latency through the real TLS server | median 1.2 ms, p95 1.4 ms |
@@ -312,7 +312,7 @@ pytest tests/ -v
 
 Keyboard-focus GUI tests on Linux require a running window manager.
 
-337 tests across 26 files (the first seven one per project phase): `test_aes_gcm.py`
+348 tests across 27 files (the first seven one per project phase): `test_aes_gcm.py`
 (encryption), `test_dh_exchange.py` (key exchange), `test_password_hash.py` (login),
 `test_signatures.py` (non-repudiation), `test_handshake_auth.py` (signed-handshake
 MITM fix), `test_replay_protection.py` (replay defenses), `test_tls_setup.py`

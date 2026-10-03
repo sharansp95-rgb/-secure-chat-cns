@@ -27,6 +27,7 @@ import threading
 import time
 
 from _demo_common import (
+    isolate_demo_state,
     banner,
     check,
     demo_username,
@@ -61,6 +62,7 @@ class _DroppingRelay(ChatServer):
 
 
 def main():
+    isolate_demo_state()   # temp user store / keys / log / exports: never your real data/
     banner("DEMO 4: hash-chained log detects a message silently dropped by the relay")
 
     try:
