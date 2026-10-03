@@ -127,7 +127,7 @@ def demo_username(label):
     return f"demo_{label}_{uuid.uuid4().hex[:8]}"
 
 
-def register_client(host, port, username, peer):
+def register_client(host, port, username, peer, event_callback=None):
     """Connect over real TLS, register a fresh account (real RSA keypair,
     real PBKDF2-hashed password), and return the ready SecureChatClient.
     Equivalent to what client/client.py's interactive flow does, just
@@ -138,7 +138,7 @@ def register_client(host, port, username, peer):
         print(f"[!] {exc}")
         sys.exit(1)
 
-    client = SecureChatClient(sock, username=username, peer=peer)
+    client = SecureChatClient(sock, username=username, peer=peer, event_callback=event_callback)
     threading.Thread(target=client.receive_loop, daemon=True).start()
 
     rsa_private_key, rsa_public_key = generate_rsa_keypair()

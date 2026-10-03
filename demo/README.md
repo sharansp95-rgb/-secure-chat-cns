@@ -78,7 +78,7 @@ To open it by hand, decode the printed port as TLS (Analyze, Decode As, or
 
 ```
 python certs/generate_certs.py     # once, if you haven't already
-pytest tests/ -v                   # all 160 automated tests
+pytest tests/ -v                   # all 325 automated tests
 python demo/run_tamper_demo.py
 python demo/run_replay_demo.py
 python demo/run_mitm_handshake_demo.py

@@ -84,7 +84,7 @@ Drag it to a corner of the screen, visible but out of the way of the two chat wi
 you'll open next.
 
 **1.4** Quick sanity check (optional but recommended): run `pytest tests/ -v` once and
-confirm it ends with `160 passed`. This is not shown to the professor; it's your own
+confirm it ends with `325 passed`. This is not shown to the professor; it's your own
 confidence check that nothing is broken before you start.
 
 ---
@@ -550,7 +550,7 @@ To verify a GUI export yourself instead (optional):
 > to end: a real GUI with a security receipt on every message, a real wire log
 > showing exactly what crosses the network, live attacks triggered from inside the
 > app and caught by specific, testable defenses, and a dashboard watching all of it —
-> all backed by 160 automated tests in our repo. Happy to answer questions or run any
+> all backed by 325 automated tests in our repo. Happy to answer questions or run any
 > of this again."
 
 ---

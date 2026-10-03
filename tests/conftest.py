@@ -105,10 +105,13 @@ class NetEnv:
         self._clients.append(client)
         return client
 
-    def register_client(self, port, username, peer):
+    def register_client(self, port, username, peer, event_callback=None):
         """Register `username` (real RSA identity, real PBKDF2 password)
-        against the server on `port` and return the ready client."""
-        return self.track(dc.register_client(HOST, port, username, peer))
+        against the server on `port` and return the ready client. Pass
+        `event_callback` to see events from the very first one (a callback
+        attached afterwards can miss events that fire right after login)."""
+        return self.track(dc.register_client(HOST, port, username, peer,
+                                             event_callback=event_callback))
 
     def _auth_attempt(self, port, kind, username, password):
         sock = client_module.connect_tls(HOST, port)

@@ -25,8 +25,9 @@ their password hash; the matching private key never leaves the client. A
 so it can verify that user's signatures -- the server just looks up and
 returns what was already public by design.
 
-Phase 6 closes the register/login plaintext-on-the-wire gap called out above:
-every accepted connection is now wrapped in TLS (ssl.PROTOCOL_TLS_SERVER)
+Phase 6 wraps every connection in TLS, so even the first register/login envelope
+is protected (before it, the whole protocol -- including passwords -- crossed the
+network as plain JSON): every accepted connection is now wrapped in TLS (ssl.PROTOCOL_TLS_SERVER)
 *before* a single byte of the envelope protocol is read, so even the very
 first "register"/"login" envelope travels inside the TLS tunnel. This is a
 transport-layer protection, layered on top of (not instead of) the
@@ -39,6 +40,11 @@ the server does with it once decrypted at that endpoint). Certs are
 generated locally by each teammate via certs/generate_certs.py -- see
 README.md -- and are never committed (a shared private key would let anyone
 with repo access impersonate the server).
+
+Later stages added, on the same relay design: a hash-chained conversation log and
+signed evidence export (clients; the server only forwards the extra fields),
+account lockout (server/lockout.py), a security event log (server/security_log.py)
+and the opt-in Attack Lab (--lab). The server still never sees plaintext or keys.
 
 Wire format: one UTF-8 JSON object per line (newline-terminated), now
 carried inside the TLS tunnel. Every envelope has a "type" field. Envelopes

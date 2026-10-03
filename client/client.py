@@ -11,8 +11,8 @@ crypto_engine/aes_gcm.py before it is sent, and decrypted after it is
 received -- the server only ever sees the encrypted chat envelope.
 
 Phase 6 wraps the whole connection in TLS before anything -- including the
-first register/login envelope -- is sent, closing the plaintext-on-the-wire
-gap noted above. The client verifies the server's certificate against our
+first register/login envelope -- is sent, so no envelope (not even a password)
+ever crosses the network unencrypted. The client verifies the server's certificate against our
 own self-signed CA (certs/server.crt, generated locally by
 certs/generate_certs.py) via load_verify_locations, rather than disabling
 verification -- so this is a real trust check, not just "encrypted but to

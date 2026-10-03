@@ -1,5 +1,27 @@
 # Secure Chat Application with Encryption
 
+> ## At a glance
+>
+> **What it is.** A two-party chat where neither the relay server nor a network observer can read or silently alter messages. Every session starts with an RSA-signed ECDH (X25519) handshake, every message is signed and AES-256-GCM encrypted, the connection is TLS 1.3, logins are PBKDF2-hashed and rate-limited, and replayed, tampered, dropped or reordered messages are detected by the receiving client. A signed, independently verifiable evidence export proves who said what. Includes a Tkinter GUI, an opt-in Attack Lab and a read-only Security Dashboard (Team 15, course 26ECSC403).
+>
+> | Measured (see [Evaluation results](#evaluation-results)) | |
+> |---|---|
+> | Automated tests | **325 passing** |
+> | Attacks detected (tamper, replay, drop, MITM, edited evidence, password burst; 20 each) | **120 / 120**, 0 false rejections in 200 normal messages |
+> | End-to-end message latency (real TLS server, loopback) | **~1.2 ms** median (requirement: < 1 s) |
+>
+> **Run it in 3 commands** (macOS/Linux, Python 3.10+):
+>
+> ```
+> python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+> .venv/bin/python certs/generate_certs.py        # one-time TLS certificate
+> demo/start_demo.sh                              # server + two chat windows + dashboard
+> ```
+>
+> Then Register a user in each chat window (name the other user as Peer) and send a message. Stop with `demo/stop_demo.sh`; run the tests with `.venv/bin/python -m pytest tests/ -q`.
+
+---
+
 **CNS course project — Team 15.**
 
 A client-server chat application in which two peers exchange messages that the relay
@@ -9,7 +31,7 @@ to broker keys), derives a fresh AES-256-GCM session key, signs and encrypts eve
 message with it, wraps the whole client↔server connection in TLS, gates every
 connection behind a PBKDF2-hashed login, rejects replayed or tampered messages, detects
 a relay dropping or reordering messages via a hash-chained conversation log, and locks
-out repeated failed logins — all properties backed by 160 automated tests and five
+out repeated failed logins — all properties backed by 325 automated tests and five
 live attack-and-defense demo scripts, plus a Tkinter GUI whose "Wire Log" panel makes
 the cryptography visible during a demo instead of invisible, an opt-in **Attack Lab**
 that triggers those same attacks for real with one click, and a live **Security
@@ -244,11 +266,11 @@ Measured, not claimed: `tools/evaluate_security.py` drives the real code against
 
 | Measure | Result |
 |---|---|
-| Test suite | 160 / 160 pass |
+| Test suite | 325 / 325 pass |
 | Attacks detected (tamper, replay, drop, MITM key swap, edited evidence, wrong-password burst; 20 each) | 120 / 120 (100%) |
 | False rejections on 200 normal messages | 0 (0.0%) |
-| End-to-end message latency through the real TLS server | median 1.2 ms, p95 1.3 ms |
-| Full session setup (TLS + login + signed handshake) | median 44.8 ms, p95 46.3 ms |
+| End-to-end message latency through the real TLS server | median 1.2 ms, p95 1.4 ms |
+| Full session setup (TLS + login + signed handshake) | median 45.0 ms, p95 46.3 ms |
 | Review 1 requirement, encryption overhead < 1 s | PASS (every p95 is far below 1 s) |
 
 **Caveats.** (1) For the repeated wrong-password trials the lockout duration was shortened to **0.5 s**; the
@@ -288,7 +310,7 @@ pip install -r requirements.txt
 pytest tests/ -v
 ```
 
-160 tests across 15 files (the first seven one per project phase): `test_aes_gcm.py`
+325 tests across 24 files (the first seven one per project phase): `test_aes_gcm.py`
 (encryption), `test_dh_exchange.py` (key exchange), `test_password_hash.py` (login),
 `test_signatures.py` (non-repudiation), `test_handshake_auth.py` (signed-handshake
 MITM fix), `test_replay_protection.py` (replay defenses), `test_tls_setup.py`
@@ -426,6 +448,23 @@ directly by the server from its user store (the requested user doesn't need to b
 online — a public key is public information regardless of presence).
 
 ## Design details
+
+<details>
+<summary>Why two crypto libraries (PyCryptodome and cryptography)?</summary>
+
+AES-256-GCM comes from **PyCryptodome** (`crypto_engine/aes_gcm.py`); ECDH/X25519, HKDF, RSA-PSS
+signatures and the TLS certificate come from the **`cryptography`** package (OpenSSL-backed).
+This is a historical split, not a security one: the course's encryption phase was built first with
+PyCryptodome's `AES.MODE_GCM`, whose interface (separate nonce, ciphertext and 16-byte tag, and a
+clear MAC-check failure) is easy to test and to show in the Wire Log. The later phases needed
+X25519, HKDF, RSA-PSS and X.509 handling, which `cryptography` provides well and PyCryptodome does
+not (X25519/HKDF/X.509 are absent or far less convenient). Both are maintained, widely used
+libraries and nothing is hand-rolled. Keeping one wrapper module per primitive
+(`aes_gcm.py`, `dh_exchange.py`, `signatures.py`) means either library could be swapped without
+touching the protocol code. `cryptography` could do AES-GCM too; the cost of consolidating
+would be re-validating the tests and the wire format for no change in security.
+
+</details>
 
 <details>
 <summary>How the handshake works (ECDH + forward secrecy)</summary>

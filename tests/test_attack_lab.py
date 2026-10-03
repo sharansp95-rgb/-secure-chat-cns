@@ -251,19 +251,29 @@ def test_end_to_end_replay_is_caught_as_a_duplicate(net):
 
 
 def test_end_to_end_mitm_is_caught_by_handshake_signature(net):
+    """The relay is armed and CONFIRMS it (lab_control_result armed=True) before bob exists.
+
+    Bob's arrival makes alice (the lower username) start the handshake by herself, so that
+    automatic handshake is the one the relay forges. Arming after both users are online is
+    a race: the automatic handshake may already have started or finished, in which case
+    initiate_handshake() is a no-op and no forged handshake is ever relayed."""
     server, host, port = net.start_server(lab_mode=True)
     alice_name, bob_name = dc.demo_username("alice"), dc.demo_username("bob")
-    alice = net.register_client(port, alice_name, bob_name)
-    bob = net.register_client(port, bob_name, alice_name)
-    b_events = collect_events(bob)
-    assert bob.fetch_peer_public_key(timeout=WAIT_SECONDS)
-    assert alice.fetch_peer_public_key(timeout=WAIT_SECONDS)
-
+    assert alice_name < bob_name          # alice is the designated initiator
+    a_events = []
+    alice = net.register_client(port, alice_name, bob_name,
+                                event_callback=lambda k, d: a_events.append((k, d)))
     alice.send_envelope({"type": "lab_control", "action": "mitm_next_handshake"})
-    alice.initiate_handshake()
+    wait_until(lambda: any(k == "lab_control_result" and d.get("armed") for k, d in a_events),
+               "the server confirming the MITM attack is armed")
+
+    b_events = []          # attached at creation: the abort can fire right after login
+    bob = net.register_client(port, bob_name, alice_name,
+                              event_callback=lambda k, d: b_events.append((k, d)))
 
     wait_until(lambda: "handshake_aborted" in kinds(b_events), "bob aborting the forged handshake")
     assert bob.session_key is None
+    wait_until(lambda: "lab_attack_performed" in kinds(a_events), "alice told the relay performed it")
 
 
 def test_lab_attack_performed_is_reported_only_to_the_armer(net):

@@ -1,8 +1,10 @@
 """AES-256-GCM authenticated encryption for the secure chat project.
 
-Standalone Phase 2 module: it is not yet wired into the live chat, because the
-session key it consumes will come from the Diffie-Hellman exchange in Phase 3.
-Until then `generate_key()` supplies keys for tests and experiments.
+Every chat message is encrypted with this module (client/client.py): the session
+key comes from the signed ECDH handshake (crypto_engine/dh_exchange.py), and the
+sender's RSA-signed record is what gets encrypted. `generate_key()` is only for
+tests, benchmarks and experiments. It uses PyCryptodome for the AES-GCM primitive
+(see README "Design details": why two crypto libraries).
 
 GCM gives us confidentiality *and* integrity in one pass. The authentication tag
 is verified on every decrypt, so a tampered ciphertext or a wrong key raises

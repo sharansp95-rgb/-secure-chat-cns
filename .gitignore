@@ -36,3 +36,6 @@ logs/
 
 # files moved aside for later deletion (never committed)
 _to_delete/
+
+# built by tools/make_submission_zip.sh
+dist/
