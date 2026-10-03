@@ -59,6 +59,24 @@ def copy_to_clipboard(widget, text):
     widget.update_idletasks()
 
 
+def focus_when_mapped(window):
+    """Raise and focus a Toplevel only after its window manager has mapped it.
+
+    X11 discards focus requests for an unmapped window. Binding to ``<Map>``
+    keeps Escape-ready dialogs consistent on Linux; the immediate path handles
+    an already-visible window, such as a reopened panel.
+    """
+    def request_focus(_event=None):
+        if window.winfo_ismapped():
+            window.lift()
+            window.focus_set()
+
+    if window.winfo_ismapped():
+        request_focus()
+    else:
+        window.bind("<Map>", request_focus, add="+")
+
+
 # ---------------------------------------------------------------------------------
 # Drawing helpers
 # ---------------------------------------------------------------------------------

@@ -1332,8 +1332,7 @@ class ChatGUI(tk.Tk):
         x = self.winfo_rootx() + max((self.winfo_width() - win.winfo_width()) // 2, 0)
         y = self.winfo_rooty() + 70
         win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
-        win.lift()
-        win.focus_set()
+        widgets.focus_when_mapped(win)
         return win
 
     def _copy_value(self, button, value):
@@ -1359,7 +1358,7 @@ class ChatGUI(tk.Tk):
             return
         if self._lab_window_alive():
             self._lab_window.deiconify()
-            self._lab_window.lift()
+            widgets.focus_when_mapped(self._lab_window)
             return
         t = self.theme
         win = tk.Toplevel(self)
@@ -1403,8 +1402,7 @@ class ChatGUI(tk.Tk):
         x = self.winfo_rootx() + max((self.winfo_width() - win.winfo_width()) // 2, 0)
         y = self.winfo_rooty() + 60
         win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
-        win.lift()
-        win.focus_set()
+        widgets.focus_when_mapped(win)
 
     def _build_lab_card(self, parent, attack, row, column):
         t = self.theme

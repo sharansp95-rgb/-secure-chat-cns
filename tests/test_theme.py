@@ -151,3 +151,40 @@ def test_presentation_shortcut_uses_command_on_mac_control_elsewhere(monkeypatch
     w.install_presentation_shortcuts(FakeWindow(), lambda: None)
     assert any("Control" in c for c in calls)
     assert not any("Command" in c for c in calls)
+
+
+def test_focus_when_mapped_waits_for_map_before_requesting_focus():
+    from gui.widgets import focus_when_mapped
+
+    class FakeWindow:
+        def __init__(self):
+            self.mapped = False
+            self.calls = []
+            self.map_callback = None
+
+        def winfo_ismapped(self):
+            return self.mapped
+
+        def bind(self, sequence, callback, add=None):
+            assert sequence == "<Map>" and add == "+"
+            self.map_callback = callback
+
+        def lift(self):
+            self.calls.append("lift")
+
+        def focus_set(self):
+            self.calls.append("focus_set")
+
+    window = FakeWindow()
+    focus_when_mapped(window)
+    assert window.calls == []
+    assert window.map_callback is not None
+
+    window.mapped = True
+    window.map_callback()
+    assert window.calls == ["lift", "focus_set"]
+
+    mapped_window = FakeWindow()
+    mapped_window.mapped = True
+    focus_when_mapped(mapped_window)
+    assert mapped_window.calls == ["lift", "focus_set"]
