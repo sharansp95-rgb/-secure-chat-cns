@@ -104,8 +104,9 @@ class SecurityDashboard(tk.Tk):
         # path is long enough to be clipped.
         shown = os.path.relpath(self.log_path, os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))))
-        if shown.startswith(".."):
-            shown = self.log_path
+        if shown.startswith(".."):             # outside the project: keep it short, not clipped
+            parts = self.log_path.split(os.sep)
+            shown = "…/" + "/".join(parts[-2:])
         self.path_var = tk.StringVar(value=f"watching: {shown}")
         self._path_label = tk.Label(header, textvariable=self.path_var, background=t.bg_panel,
                                     foreground=t.fg_hint, font=t.font("mono_small"), anchor="w")
@@ -133,7 +134,7 @@ class SecurityDashboard(tk.Tk):
             number.pack(anchor="w", padx=t.sp("md"))
             caption_label = tk.Label(tile, text=caption, background=t.bg_panel,
                                      foreground=t.fg_hint, font=t.font("caption"), anchor="w",
-                                     wraplength=t.sp(130))
+                                     wraplength=t.sp(130), justify="left")
             caption_label.pack(anchor="w", padx=t.sp("md"), pady=(0, t.sp("sm")))
             self._tiles[key] = (tile, number)
             self._captions.append((caption_label, number))
@@ -374,8 +375,14 @@ class SecurityDashboard(tk.Tk):
             return
         for username, info in sorted(self._locked.items(), key=lambda kv: -kv[1]["locked_until"]):
             row = tk.Frame(self.locked_list, background=t.bg_danger_soft, padx=t.sp("md"),
-                           pady=t.sp("sm"))
+                           pady=t.sp("xs") if self._compact else t.sp("sm"))
             row.pack(fill="x", pady=t.sp("xs"))
+            if self._compact:                  # one line: name .... countdown
+                tk.Label(row, text=username, background=t.bg_danger_soft, foreground=t.fg_primary,
+                         font=t.font("body_bold")).pack(side="left")
+                tk.Label(row, text=countdown(info["remaining"]), background=t.bg_danger_soft,
+                         foreground=t.danger, font=t.font("heading")).pack(side="right")
+                continue
             tk.Label(row, text=username, background=t.bg_danger_soft, foreground=t.fg_primary,
                      font=t.font("body_bold")).pack(anchor="w")
             tk.Label(row, text=countdown(info["remaining"]), background=t.bg_danger_soft,

@@ -260,6 +260,8 @@ counts show the checks work on these attacks, not that no attack could evade the
 
 ## Screenshots
 
+Screenshots 01-06b were retaken after the front-end redesign (GUI only; 07-10 are terminal output and 12-13 are Wireshark). For a projector, press **Cmd+Shift+P** in any window (or start with `demo/start_demo.sh --presentation`) for ~25% larger text; the launcher tiles the windows to fit your screen (`demo/layout.py`).
+
 Every file in [`docs/screenshots/`](docs/screenshots/), in demo order. (There is no `11`; the numbering
 skips it.)
 

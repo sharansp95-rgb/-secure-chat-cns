@@ -207,3 +207,24 @@ def test_tiles_and_panes_fit_the_launcher_width(make):
     window, _ = make([], geometry="700x430+10000+10000")
     assert window.kpi_row.winfo_reqwidth() <= 700
     assert all(tile_frame.winfo_width() > 120 for tile_frame, _n in window._tiles.values())
+
+
+def test_log_path_outside_the_project_is_shortened_not_clipped(make):
+    window, log = make([])
+    shown = window.path_var.get()
+    assert shown.startswith("watching: …/") and shown.endswith("events.jsonl")
+    assert len(shown) < 60
+
+
+def test_compact_locked_account_is_a_single_line(make):
+    now = time.time()
+    window, _ = make([{"ts": now - 5, "event": "account_locked", "username": "carol",
+                       "retry_after": 60, "lock_level": 0}], geometry="1026x267+10000+10000")
+    window._tick()
+    window.update()
+    assert window._compact
+    rows = window.locked_list.winfo_children()
+    assert len(rows) == 1
+    labels = [w for w in rows[0].winfo_children() if isinstance(w, tk.Label)]
+    assert [w.cget("text") for w in labels][0] == "carol" and labels[1].cget("text").startswith("0:")
+    assert rows[0].winfo_height() <= 60, "no clipped multi-line card in the short strip"

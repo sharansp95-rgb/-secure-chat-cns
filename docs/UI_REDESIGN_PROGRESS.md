@@ -86,7 +86,7 @@ and pushed; the working tree was clean when this file was written.
 | 6 Security receipt | **DONE** | see `git log` ("gui(receipt)") |
 | 7 Security dashboard | **DONE** | see `git log` ("gui(dashboard)") |
 | 8 Presentation mode + launcher layout | **DONE** | see `git log` ("gui+launcher: presentation mode") |
-| 9 Verify, "after" screenshots 01-10, README.pdf, comparison image | **NOT STARTED** | |
+| 9 Verify, "after" screenshots, README.pdf, comparison image | **DONE** (01-06b retaken; 07-10 terminal shots and 12-13 kept) | see `git log` ("screenshots") |
 
 Nothing was left half-edited: the working tree was clean at the end of step 4.
 
@@ -178,3 +178,7 @@ The scripts used lived in the session scratchpad (`.../scratchpad/ui/`: `safe_se
 - Dashboard compact mode (height < 520 px): one-line header, inline KPI rows with short labels, no subtitle/captions/hint; dashboard min height is 240 and is NOT scaled in presentation mode. At the launcher strip (~267 px) the feed keeps >= 90 px.
 - Verified only on the 1470x956 screen so far. 1920x1080 is covered by layout arithmetic + tests, not yet by a live window.
 - **Exact next action: Step 9 (verify)**: (a) drive the full demo flow in the safe environment (scratchpad scripts `ui/env.py`, `ui/dev_*.py` as a base; recreate if gone) and capture "after" screenshots at the 1470x956 launcher sizes AND at 1920x1080-style sizes (if macOS clamps a window taller than the screen, use windows that fit, e.g. 948x665 chats and a 1476x310 dashboard, as `layout.py` computes for 1920x1080); include MITM (arm in alice's window BEFORE bob logs in), export evidence banner, lockout of a throwaway name with the dashboard countdown, presentation mode on/off, network view hide/show, small and large windows; look at every screenshot, fix what is clipped or misaligned, retake. (b) confirm the terminal client is unaffected (`python client/client.py --help`, and the existing client tests). (c) replace `docs/screenshots/01..10` with fresh "after" versions with the SAME file names (01 overview two chats + dashboard, 02 security receipt, 03 attack lab panel, 04 tamper caught, 05 dashboard after attacks, 06a lockout message on the login screen, 06b lockout on the dashboard, 07/08 evidence valid/invalid (terminal verifier, unchanged: keep the existing files), 09 server + TLS fingerprint (terminal, keep), 10 evaluation results (terminal, keep)); keep 12 and 13 untouched. (d) update the README "Screenshots" captions if needed and mention `--presentation` / Cmd+Shift+P and the new tiling in the README quick start; regenerate `docs/pdf/README.pdf` (scratchpad `md2pdf.py`: `python md2pdf.py <scratchpad dir>` then copy README.pdf into docs/pdf/). (e) build `_to_delete/ui_before_after.png` (before shots are in `_to_delete/ui_before/`, gitignored). (f) run the whole suite (to a file; check the exit code), commit "screenshots: ..." and push; then the FINAL SUMMARY (critique, what changed per window, skipped features and why, test result, `git log --oneline -10`, `git status -sb`).
+
+## 12. Update after Step 9
+
+All steps are DONE. Comparison image: `_to_delete/ui_before_after.png` (gitignored). Not verified: a live window on a real 1920x1080 display (covered by layout arithmetic + live 948x665 chat / 1400x310 dashboard windows). Nothing left except any polish the user requests.

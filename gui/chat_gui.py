@@ -70,8 +70,9 @@ from gui.theme import Theme  # noqa: E402
 
 POLL_INTERVAL_MS = 50
 LAB_POLL_MS = 600
+BANNER_OK_SECONDS = 20     # "ok" banners fade after this long; warnings/blocks stay
 TAGLINE = "Accountable end-to-end encrypted messaging for hospitals"
-NETWORK_MIN_WIDTH = 860       # narrower windows start with the network view hidden
+NETWORK_MIN_WIDTH = 700       # narrower windows start with the network view hidden
 HANDOFF_WAIT_MS = 2500        # how long the login screen waits for the handshake to finish
 HANDOFF_PEER_OFFLINE_MS = 1300
 LOGIN_STEP_KINDS = ("tls_connected", "tls_cert_fingerprint", "handshake_started",
@@ -180,6 +181,10 @@ def format_envelope_line(direction, envelope):
             f"tag={_truncate(e.get('tag', ''), 12)}",
             False,
         )
+
+    if etype == "security_alert":
+        return (f"{direction} security_alert: alert={e.get('alert')} "
+                f"reason={_truncate(str(e.get('reason')), 36)} peer={e.get('peer')}"), False
 
     if etype == "system":
         return f"{direction} system: {e.get('text', '')}", False
@@ -482,8 +487,9 @@ class ChatGUI(tk.Tk):
                                          command=self._toggle_network)
         for button in (self.lab_button, self.export_button, self.network_button):
             button.pack(side="right", padx=(t.sp("sm"), 0))
-        self.settings_button = ttk.Menubutton(row1, text="⚙", style="TMenubutton", width=2)
-        self.settings_menu = tk.Menu(self.settings_button, tearoff=0)
+        self.settings_button = ttk.Button(row1, text="⚙", style="Ghost.TButton", width=3,
+                                          command=self._popup_settings)
+        self.settings_menu = tk.Menu(self, tearoff=0)
         self.settings_menu.add_checkbutton(label="Explain events", variable=self.explain_var,
                                            command=self._on_explain_toggled)
         self.settings_menu.add_command(label="Show / hide network view",
@@ -491,7 +497,6 @@ class ChatGUI(tk.Tk):
         self.settings_menu.add_checkbutton(
             label=f"Presentation mode  ({widgets.PRESENTATION_ACCELERATOR})",
             variable=self.presentation_var, command=self._on_presentation_menu)
-        self.settings_button["menu"] = self.settings_menu
         self.settings_button.pack(side="right", padx=(t.sp("sm"), 0))
 
         self.avatar = widgets.Avatar(row1, t, "?", size=t.sp(44))
@@ -517,7 +522,9 @@ class ChatGUI(tk.Tk):
 
         # "What just happened?" banner: sits right under the header, empty until a real
         # event of interest happens (see gui/explain.py: banner_for).
-        self.banner_holder = tk.Frame(frame, background=t.bg_app)
+        # height=1: Tk keeps a childless frame at its LAST size, so after a banner is
+        # dismissed the holder is shrunk back explicitly (see _dismiss_banner).
+        self.banner_holder = tk.Frame(frame, background=t.bg_app, height=1)
         self.banner_holder.pack(side="top", fill="x")
         self._banner = None
         self.chip_tls = widgets.Chip(chips, t, "TLS 1.3", "off")
@@ -562,16 +569,17 @@ class ChatGUI(tk.Tk):
 
         wire_pane = tk.Frame(paned, background=t.bg_panel_alt)
         wire_head = tk.Frame(wire_pane, background=t.bg_panel_alt)
-        wire_head.pack(side="top", fill="x", padx=t.sp("md"), pady=(t.sp("sm"), t.sp("xs")))
+        wire_head.pack(side="top", fill="x", padx=t.sp("md"), pady=(t.sp("sm"), 0))
         tk.Label(wire_head, text="Network view", background=t.bg_panel_alt,
                  foreground=t.fg_secondary, font=t.font("body_bold")).pack(side="left")
-        for label, color in (("ALERT", t.wire_alert), ("CHAT", t.wire_chat),
-                             ("HANDSHAKE", t.wire_handshake), ("TLS", t.wire_tls)):
-            tk.Label(wire_head, text=label, background=t.bg_panel_alt, foreground=color,
-                     font=t.font("mono_small_bold")).pack(side="right", padx=(t.sp("sm"), 0))
-        tk.Label(wire_pane, text="what actually crosses the network (values shortened)",
-                 background=t.bg_panel_alt, foreground=t.fg_hint, font=t.font("caption"),
-                 anchor="w").pack(side="top", fill="x", padx=t.sp("md"))
+        tk.Label(wire_head, text="values shortened", background=t.bg_panel_alt,
+                 foreground=t.fg_hint, font=t.font("caption")).pack(side="right")
+        legend = tk.Frame(wire_pane, background=t.bg_panel_alt)
+        legend.pack(side="top", fill="x", padx=t.sp("md"), pady=(0, t.sp("xs")))
+        for label, color in (("TLS", t.wire_tls), ("HANDSHAKE", t.wire_handshake),
+                             ("CHAT", t.wire_chat), ("ALERT", t.wire_alert)):
+            tk.Label(legend, text=label, background=t.bg_panel_alt, foreground=color,
+                     font=t.font("mono_small_bold")).pack(side="left", padx=(0, t.sp("sm")))
         # width=40 keeps the Text's *requested* width small, so the Panedwindow's weights
         # (not this widget's 80-char default) decide how the width is split.
         self.wire_text = tk.Text(wire_pane, wrap="word", state="disabled", width=40,
@@ -615,6 +623,10 @@ class ChatGUI(tk.Tk):
             for chip in (self.chip_e2e, self.chip_signed):
                 chip.set("bad")
         self._update_send_state()
+
+    def _popup_settings(self):
+        button = self.settings_button
+        self.settings_menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
 
     # --- Presentation mode (bigger fonts and padding for a projector) ------------------------
 
@@ -696,15 +708,27 @@ class ChatGUI(tk.Tk):
                  font=t.font("caption_bold"), anchor="w").pack(anchor="w")
         label = tk.Label(body, text=text, background=bg, foreground=t.fg_primary,
                          font=t.font("body"), justify="left", anchor="w",
-                         wraplength=max(self.winfo_width() - 160, 240))
+                         wraplength=max(self.winfo_width() - 110, 240))
         label.pack(anchor="w", fill="x")
         self._banner = (banner, label)
         self.banner_label = label
+        if severity == "ok":     # good news fades after a while; warnings stay until dismissed
+            self._banner_job = self.after(BANNER_OK_SECONDS * 1000,
+                                          lambda b=banner: self._dismiss_if_current(b))
 
     def _dismiss_banner(self):
+        job = getattr(self, "_banner_job", None)
+        if job is not None:
+            self.after_cancel(job)
+            self._banner_job = None
         if self._banner is not None:
             self._banner[0].destroy()
             self._banner = None
+        self.banner_holder.configure(height=1)
+
+    def _dismiss_if_current(self, banner):
+        if self._banner is not None and self._banner[0] is banner:
+            self._dismiss_banner()
 
     def _on_explain_toggled(self):
         if not self.explain_var.get():
@@ -787,7 +811,7 @@ class ChatGUI(tk.Tk):
 
     def _on_bubble_canvas_resize(self, event):
         if self._banner is not None:
-            self._banner[1].config(wraplength=max(self.winfo_width() - 160, 240))
+            self._banner[1].config(wraplength=max(self.winfo_width() - 110, 240))
         # Keep the inner frame as wide as the canvas so rows (and left/right alignment)
         # resize correctly, and re-wrap notices/cards so they are never clipped.
         self.bubble_canvas.itemconfigure(self._bubble_window, width=event.width)
@@ -897,6 +921,7 @@ class ChatGUI(tk.Tk):
         body = tk.Frame(card, background=bg, padx=t.sp("md"), pady=t.sp("sm"))
         body.pack(side="left", fill="x", expand=True)
 
+        start = len(self._wrappables)
         head = tk.Frame(body, background=bg)
         head.pack(fill="x")
         size = t.sp(22)
@@ -905,12 +930,14 @@ class ChatGUI(tk.Tk):
         badge.create_text(size / 2, size / 2, text="✕" if bad else "!", fill="#1a0b0b",
                           font=t.font("caption_bold"))
         badge.pack(side="left", padx=(0, t.sp("sm")))
-        tk.Label(head, text=info["headline"], background=bg, foreground=color,
-                 font=t.font("body_bold"), anchor="w").pack(side="left", fill="x")
-        if item.get("sender"):
+        if item.get("sender"):      # packed before the headline so a long headline never hides it
             tk.Label(head, text=time.strftime("%H:%M", time.localtime(item["ts"])),
                      background=bg, foreground=t.fg_secondary,
-                     font=t.font("caption")).pack(side="right")
+                     font=t.font("caption")).pack(side="right", padx=(t.sp("sm"), 0))
+        headline = tk.Label(head, text=info["headline"], background=bg, foreground=color,
+                            font=t.font("body_bold"), anchor="w", justify="left")
+        headline.pack(side="left", fill="x", expand=True)
+        self._wrappables.append((headline, 150))
 
         explain = tk.Label(body, text=info["explain"], background=bg, foreground=t.fg_primary,
                            font=t.font("body"), justify="left", anchor="w")
@@ -920,7 +947,10 @@ class ChatGUI(tk.Tk):
         caught.pack(fill="x")
         tk.Label(caught, text="Caught by", background=bg, foreground=t.fg_secondary,
                  font=t.font("caption")).pack(side="left", padx=(0, t.sp("sm")))
-        widgets.Chip(caught, t, info["check"], "bad_dark" if bad else "warn_dark").pack(side="left")
+        check_chip = widgets.Chip(caught, t, info["check"], "bad_dark" if bad else "warn_dark")
+        check_chip.configure(justify="left", anchor="w")
+        check_chip.pack(side="left", fill="x", expand=True)
+        self._wrappables.append((check_chip, 230))     # a long check name wraps instead of clipping
         if info.get("detail"):
             detail = tk.Label(body, text=str(info["detail"]), background=bg,
                               foreground=t.fg_hint, font=t.font("mono_small"),
@@ -928,7 +958,7 @@ class ChatGUI(tk.Tk):
             detail.pack(fill="x", pady=(t.sp("xs"), 0))
             self._wrappables.append((detail, 90))
         w = self.bubble_canvas.winfo_width()
-        for label, margin in self._wrappables[-2:]:
+        for label, margin in self._wrappables[start:]:
             label.config(wraplength=max(w - margin, 120))
 
     def _draw_bubble(self, item):
@@ -1486,10 +1516,13 @@ class ChatGUI(tk.Tk):
             self._add_system_notice(f"Could not write the evidence file: {exc}", warning=True)
             return
         rel = os.path.relpath(path, os.getcwd())
+        if rel.startswith(".."):           # outside the project: the full path is the runnable one
+            rel = path
+        shown = rel if len(rel) <= 60 else "…/" + "/".join(path.split(os.sep)[-2:])
         self._add_system_notice(
-            f"Evidence exported: {rel}\nVerify it independently with:\n"
+            f"Evidence exported: {shown}\nVerify it independently with:\n"
             f"python tools/verify_transcript.py \"{rel}\"")
-        self._append_wire(f"signed evidence file written: {rel}", "INFO")
+        self._append_wire(f"signed evidence file written: {shown}", "INFO")
         self._maybe_banner("evidence_exported", {})
 
     # --- sending ---------------------------------------------------------

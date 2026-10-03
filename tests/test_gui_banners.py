@@ -142,3 +142,31 @@ def test_banner_wraps_within_a_narrow_window(app):
     app.update()
     assert int(str(app.banner_label.cget("wraplength"))) <= app.winfo_width()
     assert app.banner_label.winfo_reqwidth() <= app.winfo_width()
+
+
+def test_success_banners_fade_but_blocks_and_warnings_stay(app):
+    app._handle_event("handshake_established", {"peer": "bob"})
+    assert app._banner_job is not None, "an ok banner schedules its own dismissal"
+    app._dismiss_if_current(app._banner[0])
+    assert app._banner is None and app._banner_job is None
+    app._handle_event("message_rejected", {"sender": "bob", "reason": "decryption_failed", "detail": "x"})
+    assert app._banner is not None and getattr(app, "_banner_job", None) is None, \
+        "a block stays until it is dismissed or replaced"
+
+
+def test_dismissing_a_stale_banner_does_not_remove_a_newer_one(app):
+    app._handle_event("handshake_established", {"peer": "bob"})
+    old = app._banner[0]
+    app._handle_event("message_rejected", {"sender": "bob", "reason": "replay_duplicate", "detail": "x"})
+    app._dismiss_if_current(old)
+    assert app._banner is not None and "duplicate nonce" in banner_text(app)
+
+
+def test_settings_button_is_compact_and_opens_the_menu(app):
+    from tkinter import ttk
+    assert isinstance(app.settings_button, ttk.Button)
+    assert app.settings_button.winfo_reqwidth() < app.export_button.winfo_reqwidth() * 0.6
+    popped = []
+    app.settings_menu.tk_popup = lambda x, y: popped.append((x, y))
+    app._popup_settings()
+    assert popped

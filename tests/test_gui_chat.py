@@ -198,18 +198,20 @@ def test_network_view_toggle_hides_and_restores_the_wire_pane(app):
     assert "still here" in all_text(app)
 
 
-def test_narrow_window_starts_with_the_network_view_hidden():
+@pytest.mark.parametrize("size,visible", [("690x560", False), ("723x576", True), ("1040x660", True)])
+def test_network_view_default_depends_on_window_width(size, visible):
+    """Below 700px the conversation needs the room; at the launcher's 723px both fit."""
     try:
         window = chat_gui.ChatGUI()
     except tk.TclError as exc:
         pytest.skip(f"no display available for Tk: {exc}")
     try:
-        window.geometry("720x560+10000+10000")
+        window.geometry(f"{size}+10000+10000")
         window.update()
         window._handle_event("auth_success", dict(AUTH))
         window._handoff_to_chat()
         window.update()
-        assert not window._network_visible
+        assert window._network_visible is visible
     finally:
         window.update()
         window.destroy()
@@ -236,3 +238,101 @@ def test_a_password_is_never_shown_in_the_network_view(app):
     app._handle_event("envelope_sent", {"envelope": {"type": "login", "username": "alice",
                                                      "password": "hunter2-secret"}})
     assert "hunter2-secret" not in app.wire_text.get("1.0", "end")
+
+
+# ---- regressions found in the "after" screenshots ---------------------------------------
+
+def test_network_legend_and_title_fit_the_launcher_width():
+    """At the launcher's 723px the legend read "NDSHA" and the subtitle was cut off."""
+    try:
+        window = chat_gui.ChatGUI()
+    except tk.TclError as exc:
+        pytest.skip(f"no display available for Tk: {exc}")
+    try:
+        window.geometry("723x576+10000+10000")
+        window.update()
+        window._handle_event("auth_success", dict(AUTH))
+        window._handoff_to_chat()
+        window.update()
+        assert window._network_visible
+        pane_right = window.wire_pane.winfo_rootx() + window.wire_pane.winfo_width()
+        labels = [w for f in window.wire_pane.winfo_children() if isinstance(f, tk.Frame)
+                  for w in f.winfo_children() if isinstance(w, tk.Label)]
+        assert len(labels) >= 6   # title, "values shortened" + 4 legend words
+        for label in labels:
+            assert label.winfo_width() >= label.winfo_reqwidth(), (label.cget("text"), "clipped")
+            assert label.winfo_rootx() + label.winfo_width() <= pane_right
+    finally:
+        window.update()
+        window.destroy()
+
+
+def test_blocked_card_time_is_not_clipped_by_a_long_headline(app):
+    establish(app)
+    app.geometry("723x576+10000+10000")
+    app.update()
+    app._handle_event("message_rejected", {"sender": "bob", "reason": "decryption_failed",
+                                           "detail": "x"})
+    app.update()
+    stamps = [w for r in app.bubble_list.winfo_children() for w in _walk(r)
+              if isinstance(w, tk.Label) and len(str(w.cget("text"))) == 5
+              and str(w.cget("text"))[2] == ":"]
+    assert stamps and all(w.winfo_width() >= w.winfo_reqwidth() for w in stamps)
+
+
+def _walk(widget):
+    yield widget
+    for child in widget.winfo_children():
+        yield from _walk(child)
+
+
+def test_security_alert_wire_line_is_a_readable_sentence_not_a_json_dump():
+    text, _warn = chat_gui.format_envelope_line("-->", {
+        "type": "security_alert", "alert": "message_rejected", "reason": "decryption_failed",
+        "peer": "alice", "seq": None, "timestamp": 1})
+    assert "alert=message_rejected" in text and "reason=decryption_failed" in text
+    assert "{" not in text and '"' not in text
+    assert chat_gui.wire_kind({"type": "security_alert"}) == "ALERT"
+
+
+def test_evidence_notice_keeps_a_long_outside_path_short(app):
+    long_dir = "/very/long/" + "/".join(["directory"] * 8) + "/exports"
+    path = f"{long_dir}/evidence_alice_bob_20261003-072839.json"
+
+    class Stub:
+        def export_evidence(self):
+            return path
+    app.client = Stub()
+    app._on_export_evidence()
+    app.update()
+    text = all_text(app)
+    assert "Evidence exported: …/exports/evidence_alice_bob_20261003-072839.json" in text
+    assert f'verify_transcript.py "{path}"' in text, "the command keeps the real, runnable path"
+
+
+def test_dismissing_a_banner_leaves_no_blank_gap_under_the_header(app):
+    app._handle_event("handshake_established", {"peer": "bob"})
+    app.update()
+    assert app.banner_holder.winfo_height() > 30
+    app._dismiss_banner()
+    app.update()
+    assert app.banner_holder.winfo_height() <= 2, "Tk keeps a childless frame at its old size"
+    paned_top = app.paned.winfo_rooty() - app.winfo_rooty()
+    assert paned_top - (app.header_frame.winfo_rooty() - app.winfo_rooty() + app.header_frame.winfo_height()) < 40
+
+
+def test_long_check_name_wraps_inside_a_narrow_blocked_card(app):
+    establish(app)
+    app.geometry("690x560+10000+10000")
+    app.update()
+    app._handle_event("handshake_aborted", {
+        "peer": "bob", "reason": "the ECDH public key claimed to be from bob did NOT verify against"})
+    app.update()
+    chips = [w for r in app.bubble_list.winfo_children() for w in _walk(r)
+             if isinstance(w, tk.Label) and str(w.cget("text")) == "RSA signature on the ECDH handshake"]
+    assert chips
+    card_right = max(w.winfo_rootx() + w.winfo_width() for w in _walk(app.bubble_list.winfo_children()[-1])
+                     if isinstance(w, tk.Frame))
+    chip = chips[0]
+    assert chip.winfo_rootx() + chip.winfo_width() <= card_right + 2
+    assert chip.winfo_width() >= chip.winfo_reqwidth(), "the chip text is not cut off"
