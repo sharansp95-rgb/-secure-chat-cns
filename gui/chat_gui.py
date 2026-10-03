@@ -52,10 +52,20 @@ from crypto_engine.signatures import fingerprint  # noqa: E402
 from crypto_engine.signatures import generate_keypair as generate_rsa_keypair  # noqa: E402
 from crypto_engine.signatures import serialize_public_key  # noqa: E402
 from gui import widgets  # noqa: E402
-from gui.explain import banner_for, describe_rejection  # noqa: E402
+from server.security_log import DEFAULT_LOG_PATH, read_events  # noqa: E402
+from gui.explain import (  # noqa: E402
+    LAB_ATTACKS,
+    LAB_BY_ACTION,
+    LAB_SILENT_AFTER_SECONDS,
+    banner_for,
+    describe_rejection,
+    find_lab_detection,
+    lab_status,
+)
 from gui.theme import Theme  # noqa: E402
 
 POLL_INTERVAL_MS = 50
+LAB_POLL_MS = 600
 TAGLINE = "Accountable end-to-end encrypted messaging for hospitals"
 NETWORK_MIN_WIDTH = 860       # narrower windows start with the network view hidden
 HANDOFF_WAIT_MS = 2500        # how long the login screen waits for the handshake to finish
@@ -191,8 +201,9 @@ def format_envelope_line(direction, envelope):
 
 
 class ChatGUI(tk.Tk):
-    def __init__(self):
+    def __init__(self, log_path=None):
         super().__init__()
+        self.log_path = log_path or DEFAULT_LOG_PATH   # read-only: Attack Lab results
         self.title("Secure Chat (GUI)")
         self.geometry("1040x660")
         self.minsize(680, 460)
@@ -211,6 +222,9 @@ class ChatGUI(tk.Tk):
         self.sock = None
         self.username = None
         self.peer = None
+        self._lab_state = {a['action']: {'state': 'idle', 'fired_at': 0.0, 'detail': None}
+                           for a in LAB_ATTACKS}
+        self._lab_last_message = 'No action armed yet.'
         self._auth_data = None       # auth_success payload, while the login screen waits
         self._held_events = []       # events that arrived during that wait (replayed in order)
         self._holding = False
@@ -1215,27 +1229,22 @@ class ChatGUI(tk.Tk):
     # --- Attack Lab (Stage C) --------------------------------------------------
     #
     # Opt-in, lab-mode-only, and enforced entirely server-side (see
-    # server/server.py's ChatServer._handle_lab_control): this panel only
-    # sends a request; the server decides whether to honor it. Detection is
-    # never claimed here -- it comes from the OTHER window's own, unmodified
-    # client-side checks (GCM tag, RSA signature, replay window, hash chain,
-    # handshake signature), visible live in that window's Conversation/Wire
-    # Log, exactly as an unprompted attack would be.
+    # server/server.py's ChatServer._handle_lab_control): this panel only sends a
+    # request; the server decides whether to honor it. Detection is never claimed here.
+    # It comes from the OTHER window's own, unmodified client-side checks (GCM tag, RSA
+    # signature, replay window, hash chain, handshake signature). That client reports
+    # what it caught to the server, which logs it; each card below reads that record
+    # (read-only, like the dashboard) to show "Caught by ..." -- or says plainly that no
+    # report has arrived, so the audience should watch the other window.
 
-    _LAB_ACTIONS = [
-        ("tamper_next", "Tamper next message",
-         "The relay flips a byte of your next message's ciphertext in transit."),
-        ("replay_last", "Replay last message",
-         "The relay immediately resends your most recent message a second time."),
-        ("drop_next", "Drop next message",
-         "The relay silently discards your next message -- it never reaches your peer."),
-        ("mitm_next_handshake", "MITM next handshake",
-         "The relay substitutes its own key in the next ECDH handshake you start "
-         "(arm this before your peer logs in, if you're the one who'll initiate)."),
-    ]
+    _LAB_ACTIONS = [(a["action"], a["label"], a["desc"]) for a in LAB_ATTACKS]
 
     def _open_attack_lab(self):
         if self.client is None or not self.client.lab_mode:
+            return
+        if self._lab_window_alive():
+            self._lab_window.deiconify()
+            self._lab_window.lift()
             return
         t = self.theme
         win = tk.Toplevel(self)
@@ -1245,55 +1254,141 @@ class ChatGUI(tk.Tk):
         win.transient(self)
         win.bind("<Escape>", lambda _e: win.destroy())
         self._lab_window = win
+        self._lab_cards = {}
 
-        banner = tk.Frame(win, background=t.bg_lab, padx=16, pady=10)
+        banner = tk.Frame(win, background=t.bg_lab, padx=t.sp("lg"), pady=t.sp("sm"))
         banner.pack(fill="x")
         tk.Label(banner, text="LAB MODE: relay is acting maliciously on request",
-                 background=t.bg_lab, foreground="#ffffff",
-                 font=(t.ui_font, t.size(11), "bold")).pack(anchor="w")
+                 background=t.bg_lab, foreground=t.fg_on_accent,
+                 font=t.font("heading")).pack(anchor="w")
 
-        body = tk.Frame(win, background=t.bg_lab_panel, padx=18, pady=14)
+        body = tk.Frame(win, background=t.bg_lab_panel, padx=t.sp("lg"), pady=t.sp("md"))
         body.pack(fill="both", expand=True)
-        tk.Label(body, text=f"Every action below targets YOUR OWN next outgoing message "
-                             f"or handshake ({self.client.username}), relayed to "
-                             f"{self.client.peer}. Each is one-shot: it fires once, then "
-                             f"disarms itself.",
-                 background=t.bg_lab_panel, foreground=t.fg_secondary,
-                 font=(t.ui_font, t.size(9)), wraplength=420, justify="left").pack(
-            anchor="w", pady=(0, 12))
+        tk.Label(body, text=f"Each action targets YOUR OWN next message or handshake "
+                            f"({self.client.username}, relayed to {self.client.peer}) and is "
+                            f"one-shot: it fires once, then disarms. Esc closes this panel.",
+                 background=t.bg_lab_panel, foreground=t.fg_secondary, font=t.font("caption"),
+                 wraplength=t.sp(640), justify="left").pack(anchor="w", pady=(0, t.sp("sm")))
 
-        self._lab_result_var = tk.StringVar(value="No action armed yet.")
+        grid = tk.Frame(body, background=t.bg_lab_panel)
+        grid.pack(fill="both", expand=True)
+        for column in range(2):
+            grid.columnconfigure(column, weight=1, uniform="lab")
+        for index, attack in enumerate(LAB_ATTACKS):
+            self._build_lab_card(grid, attack, index // 2, index % 2)
+
+        self._lab_result_var = tk.StringVar(value=self._lab_last_message)
         tk.Label(body, textvariable=self._lab_result_var, background=t.bg_lab_panel,
-                 foreground=t.fg_lab_banner, font=(t.mono_font, t.size(9)),
-                 wraplength=420, justify="left").pack(anchor="w", pady=(0, 14))
+                 foreground=t.warning, font=t.font("mono_small"), wraplength=t.sp(640),
+                 justify="left", anchor="w").pack(anchor="w", pady=(t.sp("sm"), 0), fill="x")
 
-        for action, label, desc in self._LAB_ACTIONS:
-            row = tk.Frame(body, background=t.bg_lab_panel)
-            row.pack(fill="x", pady=(0, 10))
-            ttk.Button(row, text=label, style="Lab.TButton",
-                      command=lambda a=action: self._arm_lab_action(a)).pack(anchor="w")
-            tk.Label(row, text=desc, background=t.bg_lab_panel, foreground=t.fg_secondary,
-                     font=(t.ui_font, t.size(9)), wraplength=420, justify="left").pack(
-                anchor="w", pady=(3, 0))
-
-        ttk.Button(body, text="Close", command=win.destroy).pack(anchor="e", pady=(4, 0))
-
+        for attack in LAB_ATTACKS:
+            self._render_lab_card(attack["action"])
         win.update_idletasks()
-        x = self.winfo_rootx() + (self.winfo_width() - win.winfo_width()) // 2
+        x = self.winfo_rootx() + max((self.winfo_width() - win.winfo_width()) // 2, 0)
         y = self.winfo_rooty() + 60
         win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    def _build_lab_card(self, parent, attack, row, column):
+        t = self.theme
+        card = tk.Frame(parent, background=t.bg_panel, highlightbackground=t.bg_lab,
+                        highlightcolor=t.bg_lab, highlightthickness=1,
+                        padx=t.sp("md"), pady=t.sp("sm"))
+        card.grid(row=row, column=column, sticky="nsew",
+                  padx=(0 if column == 0 else t.sp("sm"), t.sp("sm") if column == 0 else 0),
+                  pady=(0 if row == 0 else t.sp("sm"), t.sp("sm") if row == 0 else 0))
+        head = tk.Frame(card, background=t.bg_panel)
+        head.pack(fill="x")
+        size = t.sp(34)
+        glyph = tk.Canvas(head, width=size, height=size, background=t.bg_panel,
+                          highlightthickness=0)
+        glyph.create_oval(1, 1, size - 1, size - 1, fill=t.bg_lab, outline="")
+        glyph.create_text(size / 2, size / 2, text=attack["glyph"], fill=t.fg_on_accent,
+                          font=t.font("heading"))
+        glyph.pack(side="left", padx=(0, t.sp("sm")))
+        tk.Label(head, text=attack["title"], background=t.bg_panel, foreground=t.fg_primary,
+                 font=t.font("heading")).pack(side="left")
+        tk.Label(card, text=attack["desc"], background=t.bg_panel, foreground=t.fg_secondary,
+                 font=t.font("caption"), wraplength=t.sp(300), justify="left",
+                 anchor="w").pack(fill="x", pady=(t.sp("xs"), t.sp("xs")))
+        defence = tk.Frame(card, background=t.bg_panel)
+        defence.pack(fill="x")
+        tk.Label(defence, text="Expected defence", background=t.bg_panel,
+                 foreground=t.fg_hint, font=t.font("caption")).pack(anchor="w")
+        tk.Label(defence, text=attack["check"], background=t.bg_panel, foreground=t.accent,
+                 font=t.font("caption_bold"), wraplength=t.sp(300), justify="left",
+                 anchor="w").pack(anchor="w")
+        chip = widgets.Chip(card, t, "Not armed", "off")
+        chip.configure(wraplength=t.sp(300), justify="left", anchor="w")
+        chip.pack(fill="x", pady=(t.sp("xs"), t.sp("sm")))
+        button = ttk.Button(card, text=attack["label"], style="Lab.TButton",
+                            command=lambda a=attack["action"]: self._arm_lab_action(a))
+        button.pack(fill="x")
+        self._lab_cards[attack["action"]] = {"card": card, "chip": chip, "button": button}
+
+    def _set_lab_state(self, action, state, detail=None):
+        entry = self._lab_state[action]
+        entry["state"], entry["detail"] = state, detail
+        if state == "fired":
+            entry["fired_at"] = time.time()
+        self._render_lab_card(action)
+
+    def _render_lab_card(self, action):
+        if not self._lab_window_alive():
+            return
+        entry = self._lab_state[action]
+        kind, text = lab_status(entry["state"], action, self.peer or "your peer", entry.get("detail"))
+        self._lab_cards[action]["chip"].set(kind, text)
 
     def _arm_lab_action(self, action):
         if self.client is None:
             return
-        label = next(l for a, l, _ in self._LAB_ACTIONS if a == action)
-        self._lab_result_var.set(f"Arming: {label}...")
+        self._set_lab_state(action, "arming")
+        self._lab_last_message = f"Arming: {LAB_BY_ACTION[action]['label']}..."
+        if self._lab_window_alive():
+            self._lab_result_var.set(self._lab_last_message)
         threading.Thread(target=self.client.send_lab_control, args=(action,),
                          daemon=True).start()
 
     def _lab_window_alive(self):
         win = getattr(self, "_lab_window", None)
-        return win is not None and win.winfo_exists()
+        return win is not None and bool(win.winfo_exists())
+
+    def _on_lab_control_result(self, data):
+        action = data.get("action")
+        if action in self._lab_state:
+            self._set_lab_state(action, "armed" if data.get("armed") else "rejected",
+                                data.get("detail"))
+        self._lab_last_message = f"{'Armed' if data.get('armed') else 'Rejected'}: {data.get('detail')}"
+        if self._lab_window_alive():
+            self._lab_result_var.set(self._lab_last_message)
+
+    def _on_lab_attack_performed(self, data):
+        action = data.get("action")
+        self._lab_last_message = (f"Performed by relay: {data.get('detail')}\n"
+                                  f"(watch {self.peer}'s window for the result)")
+        if self._lab_window_alive():
+            self._lab_result_var.set(self._lab_last_message)
+        if action in self._lab_state:
+            self._set_lab_state(action, "fired")
+            self.after(LAB_POLL_MS, self._poll_lab_detection)
+
+    def _poll_lab_detection(self):
+        """While an attack is waiting for its result, look in the security log for the
+        victim's own report of catching it."""
+        pending = [a for a, e in self._lab_state.items() if e["state"] in ("fired", "silent")]
+        if not pending:
+            return
+        events = read_events(self.log_path)
+        now = time.time()
+        for action in pending:
+            entry = self._lab_state[action]
+            if find_lab_detection(action, events, self.peer, entry["fired_at"] - 1.0):
+                self._set_lab_state(action, "caught")
+            elif entry["state"] == "fired" and now - entry["fired_at"] > LAB_SILENT_AFTER_SECONDS:
+                self._set_lab_state(action, "silent")
+        if any(e["state"] in ("fired", "silent") for e in self._lab_state.values()):
+            self.after(LAB_POLL_MS, self._poll_lab_detection)
 
     # --- evidence export -----------------------------------------------------
 
@@ -1389,16 +1484,11 @@ class ChatGUI(tk.Tk):
             return
 
         if kind == "lab_control_result":
-            if self._lab_window_alive():
-                verb = "Armed" if data.get("armed") else "Rejected"
-                self._lab_result_var.set(f"{verb}: {data.get('detail')}")
+            self._on_lab_control_result(data)
             return
 
         if kind == "lab_attack_performed":
-            if self._lab_window_alive():
-                self._lab_result_var.set(
-                    f"Performed by relay: {data.get('detail')}\n"
-                    f"(watch {self.peer}'s window for the result)")
+            self._on_lab_attack_performed(data)
             return
 
         if kind == "envelope_sent":
@@ -1527,8 +1617,11 @@ def main():
                         help="server port to pre-fill on the login screen "
                              f"(default {DEFAULT_PORT})")
     parser.add_argument("--geometry", help="initial window size/position, e.g. 780x560+10+40")
+    parser.add_argument("--log-path", default=None,
+                        help="security event log the Attack Lab reads results from "
+                             "(default: the server's logs/security_events.jsonl)")
     args = parser.parse_args()
-    app = ChatGUI()
+    app = ChatGUI(log_path=args.log_path)
     app.port_var.set(str(args.port))
     if args.geometry:
         app.geometry(args.geometry)
