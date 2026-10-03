@@ -152,6 +152,13 @@ def is_timestamp_fresh(timestamp, now=None,
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CAFILE = os.path.join(_PROJECT_ROOT, "certs", "server.crt")
+CERT_DIR_ENV = "SECURECHAT_CERT_DIR"
+
+
+def default_cafile():
+    """Return the normal CA path, or pytest's inherited temporary override."""
+    cert_dir = os.environ.get(CERT_DIR_ENV)
+    return os.path.join(cert_dir, "server.crt") if cert_dir else DEFAULT_CAFILE
 
 
 class TLSSetupError(Exception):
@@ -160,8 +167,8 @@ class TLSSetupError(Exception):
     doesn't recognize."""
 
 
-def connect_tls(host, port, cafile=DEFAULT_CAFILE, server_hostname="localhost",
-                 on_cert_fingerprint=None):
+def connect_tls(host, port, cafile=None, server_hostname="localhost",
+                on_cert_fingerprint=None):
     """Open a TCP connection to (host, port) and wrap it in TLS, verifying
     the server's certificate against our own self-signed CA.
 
@@ -184,6 +191,7 @@ def connect_tls(host, port, cafile=DEFAULT_CAFILE, server_hostname="localhost",
     this is purely diagnostic, not a replacement for the verification
     failure handling below, which still fires exactly as before.
     """
+    cafile = default_cafile() if cafile is None else cafile
     if not os.path.exists(cafile):
         raise TLSSetupError(
             f"TLS CA certificate not found at {cafile}.\n"
@@ -1104,7 +1112,7 @@ def main():
                          help="register a new account instead of logging in "
                               "(used with --username/--password to skip prompts)")
     parser.add_argument("--peer", help="username of the peer to chat securely with")
-    parser.add_argument("--cafile", default=DEFAULT_CAFILE,
+    parser.add_argument("--cafile", default=None,
                          help="CA certificate to verify the server against "
                               "(default: certs/server.crt)")
     args = parser.parse_args()

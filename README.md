@@ -310,6 +310,8 @@ pip install -r requirements.txt
 pytest tests/ -v
 ```
 
+Keyboard-focus GUI tests on Linux require a running window manager.
+
 337 tests across 26 files (the first seven one per project phase): `test_aes_gcm.py`
 (encryption), `test_dh_exchange.py` (key exchange), `test_password_hash.py` (login),
 `test_signatures.py` (non-repudiation), `test_handshake_auth.py` (signed-handshake

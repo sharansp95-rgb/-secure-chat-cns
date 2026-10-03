@@ -496,7 +496,7 @@ class ChatGUI(tk.Tk):
         self.settings_menu.add_command(label="Show / hide network view",
                                        command=self._toggle_network)
         self.settings_menu.add_checkbutton(
-            label=f"Presentation mode  ({widgets.PRESENTATION_ACCELERATOR})",
+            label=f"Presentation mode  ({widgets.presentation_accelerator()})",
             variable=self.presentation_var, command=self._on_presentation_menu)
         self.settings_button.pack(side="right", padx=(t.sp("sm"), 0))
 
@@ -635,7 +635,7 @@ class ChatGUI(tk.Tk):
         """A real menu-bar "View" menu, so Presentation mode is also reachable by menu."""
         menubar = tk.Menu(self)
         view = tk.Menu(menubar, tearoff=0)
-        view.add_checkbutton(label="Presentation mode", accelerator=widgets.PRESENTATION_ACCELERATOR,
+        view.add_checkbutton(label="Presentation mode", accelerator=widgets.presentation_accelerator(),
                              variable=self.presentation_var, command=self._on_presentation_menu)
         view.add_checkbutton(label="Explain events", variable=self.explain_var,
                              command=self._on_explain_toggled)
@@ -1332,6 +1332,8 @@ class ChatGUI(tk.Tk):
         x = self.winfo_rootx() + max((self.winfo_width() - win.winfo_width()) // 2, 0)
         y = self.winfo_rooty() + 70
         win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        win.lift()
+        win.focus_set()
         return win
 
     def _copy_value(self, button, value):
@@ -1401,6 +1403,8 @@ class ChatGUI(tk.Tk):
         x = self.winfo_rootx() + max((self.winfo_width() - win.winfo_width()) // 2, 0)
         y = self.winfo_rooty() + 60
         win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        win.lift()
+        win.focus_set()
 
     def _build_lab_card(self, parent, attack, row, column):
         t = self.theme

@@ -133,10 +133,17 @@ def test_is_no_display_error_false_for_bad_cursor():
 def test_presentation_shortcut_uses_command_on_mac_control_elsewhere(monkeypatch):
     from gui import widgets as w
     monkeypatch.setattr(w, "_MAC", True)
-    assert w.PRESENTATION_ACCELERATOR == "⌘⇧P"
-    # The install function binds Command on mac
+    assert w.presentation_accelerator() == "⌘⇧P"
+    mac_calls = []
+    class FakeWindow:
+        def bind_all(self, seq, func):
+            mac_calls.append(seq)
+    w.install_presentation_shortcuts(FakeWindow(), lambda: None)
+    assert any("Command" in c for c in mac_calls)
+    assert not any("Control" in c for c in mac_calls)
+
     monkeypatch.setattr(w, "_MAC", False)
-    # PRESENTATION_ACCELERATOR is evaluated at import time; test install_presentation_shortcuts
+    assert w.presentation_accelerator() == "Ctrl+Shift+P"
     calls = []
     class FakeWindow:
         def bind_all(self, seq, func):

@@ -200,7 +200,7 @@ class SecurityDashboard(tk.Tk):
     def _build_menubar(self):
         menubar = tk.Menu(self)
         view = tk.Menu(menubar, tearoff=0)
-        view.add_checkbutton(label="Presentation mode", accelerator=widgets.PRESENTATION_ACCELERATOR,
+        view.add_checkbutton(label="Presentation mode", accelerator=widgets.presentation_accelerator(),
                              variable=self.presentation_var, command=self._on_presentation_menu)
         menubar.add_cascade(label="View", menu=view)
         self.config(menu=menubar)

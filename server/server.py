@@ -91,19 +91,35 @@ DEFAULT_PORT = 5000
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CERT_PATH = os.path.join(_PROJECT_ROOT, "certs", "server.crt")
 DEFAULT_KEY_PATH = os.path.join(_PROJECT_ROOT, "certs", "server.key")
+CERT_DIR_ENV = "SECURECHAT_CERT_DIR"
+
+
+def default_cert_paths():
+    """Return the normal cert paths, or the test-only override when set.
+
+    Resolving this at connection-server construction time keeps subprocesses
+    hermetic too: pytest's environment is inherited by their Python process.
+    """
+    cert_dir = os.environ.get(CERT_DIR_ENV)
+    if cert_dir:
+        return os.path.join(cert_dir, "server.crt"), os.path.join(cert_dir, "server.key")
+    return DEFAULT_CERT_PATH, DEFAULT_KEY_PATH
 
 
 class CertsMissingError(Exception):
     """Raised when certs/server.crt or certs/server.key can't be found."""
 
 
-def build_server_ssl_context(certfile=DEFAULT_CERT_PATH, keyfile=DEFAULT_KEY_PATH):
+def build_server_ssl_context(certfile=None, keyfile=None):
     """Build the server-side TLS context, loaded with our self-signed cert.
 
     Raises CertsMissingError with a clear, actionable message rather than
     letting a raw FileNotFoundError/SSLError surface if the certs haven't
     been generated yet.
     """
+    default_certfile, default_keyfile = default_cert_paths()
+    certfile = default_certfile if certfile is None else certfile
+    keyfile = default_keyfile if keyfile is None else keyfile
     if not os.path.exists(certfile) or not os.path.exists(keyfile):
         raise CertsMissingError(
             f"TLS certificate/key not found at {certfile} / {keyfile}.\n"
@@ -155,11 +171,14 @@ _LAB_ACTIONS = {"tamper_next", "replay_last", "drop_next", "mitm_next_handshake"
 
 class ChatServer:
     def __init__(self, host=DEFAULT_HOST, port=DEFAULT_PORT,
-                 certfile=DEFAULT_CERT_PATH, keyfile=DEFAULT_KEY_PATH,
+                 certfile=None, keyfile=None,
                  lab_mode=False, lockout=None):
         self.host = host
         self.port = port
         self.lab_mode = lab_mode
+        default_certfile, default_keyfile = default_cert_paths()
+        certfile = default_certfile if certfile is None else certfile
+        keyfile = default_keyfile if keyfile is None else keyfile
         # Stage D: login lockout + per-address rate limiting (server/lockout.py).
         # `lockout` is injectable so tests can use tiny thresholds/windows
         # instead of the real 5-failures/5-minute defaults.
@@ -670,8 +689,8 @@ def main():
     parser = argparse.ArgumentParser(description="Secure chat relay server")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--certfile", default=DEFAULT_CERT_PATH)
-    parser.add_argument("--keyfile", default=DEFAULT_KEY_PATH)
+    parser.add_argument("--certfile", default=None)
+    parser.add_argument("--keyfile", default=None)
     parser.add_argument("--lab", action="store_true",
                          help="enable the opt-in Attack Lab (lab_control envelopes from "
                               "authenticated localhost clients only); OFF by default")

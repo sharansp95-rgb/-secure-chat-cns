@@ -392,7 +392,11 @@ class Field(tk.Frame):
 # ---------------------------------------------------------------------------------
 
 _MAC = sys.platform == "darwin"
-PRESENTATION_ACCELERATOR = "⌘⇧P" if _MAC else "Ctrl+Shift+P"
+
+
+def presentation_accelerator():
+    """Display label for the platform's presentation-mode shortcut."""
+    return "⌘⇧P" if _MAC else "Ctrl+Shift+P"
 
 
 def install_presentation_shortcuts(window, toggle):

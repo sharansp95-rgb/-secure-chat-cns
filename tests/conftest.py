@@ -77,22 +77,18 @@ def _test_certs():
     finally:
         gen_mod.KEY_PATH, gen_mod.CERT_PATH = orig_key, orig_cert
 
-    # Patch the default paths every module uses so the server and client
-    # both find our throwaway cert automatically.
-    _patches = {
-        server_module: [("DEFAULT_CERT_PATH", cert_path), ("DEFAULT_KEY_PATH", key_path)],
-        client_module: [("DEFAULT_CAFILE", cert_path)],
-    }
-    originals = {}
-    for mod, attrs in _patches.items():
-        for attr, value in attrs:
-            originals[(mod, attr)] = getattr(mod, attr)
-            setattr(mod, attr, value)
+    # Resolve paths at use time through an environment variable, rather than
+    # patching imported modules.  That makes script-mode subprocess tests and
+    # demo helpers inherit the same throwaway certificate directory.
+    old_cert_dir = os.environ.get("SECURECHAT_CERT_DIR")
+    os.environ["SECURECHAT_CERT_DIR"] = tmpdir
 
     yield cert_path, key_path
 
-    for (mod, attr), value in originals.items():
-        setattr(mod, attr, value)
+    if old_cert_dir is None:
+        os.environ.pop("SECURECHAT_CERT_DIR", None)
+    else:
+        os.environ["SECURECHAT_CERT_DIR"] = old_cert_dir
 
     import shutil
     shutil.rmtree(tmpdir, ignore_errors=True)
