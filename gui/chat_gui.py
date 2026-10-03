@@ -61,6 +61,10 @@ from gui.explain import (  # noqa: E402
     describe_rejection,
     find_lab_detection,
     lab_status,
+    receipt_details,
+    receipt_rows,
+    receipt_summary,
+    shorten,
 )
 from gui.theme import Theme  # noqa: E402
 
@@ -1156,75 +1160,94 @@ class ChatGUI(tk.Tk):
         t = self.theme
         win = tk.Toplevel(self)
         win.title("Security receipt")
-        win.configure(background=t.bg_panel)
+        win.configure(background=t.bg_app)
         win.resizable(False, False)
         win.transient(self)
         win.bind("<Escape>", lambda _e: win.destroy())
+        self._receipt_window = win
 
-        body = tk.Frame(win, background=t.bg_panel, padx=22, pady=18)
+        body = tk.Frame(win, background=t.bg_app, padx=t.sp("lg"), pady=t.sp("lg"))
         body.pack(fill="both", expand=True)
-        body.columnconfigure(1, weight=1)
-
-        def short(value, n=20):
-            return "-" if not value else (value if len(value) <= n else value[:n] + "…")
-
         sent = receipt.get("direction") == "sent"
-        tk.Label(body, text="Security receipt", background=t.bg_panel,
-                 foreground=t.fg_primary,
-                 font=(t.ui_font, t.size(14), "bold")).grid(row=0, column=0, columnspan=2,
-                                                            sticky="w")
-        tk.Label(body, text=("Message you sent" if sent else "Message you received"),
-                 background=t.bg_panel, foreground=t.fg_secondary,
-                 font=(t.ui_font, t.size(9))).grid(row=1, column=0, columnspan=2,
-                                                   sticky="w", pady=(0, 14))
+        head = tk.Frame(body, background=t.bg_app)
+        head.pack(fill="x", pady=(0, t.sp("md")))
+        mark = tk.Canvas(head, width=t.sp(36), height=t.sp(40), background=t.bg_app,
+                         highlightthickness=0)
+        widgets.draw_shield(mark, t.sp(18), t.sp(20), t.sp(36), fill=t.bg_accent, outline=t.accent)
+        widgets.draw_check(mark, t.sp(18), t.sp(21), t.sp(28), t.fg_on_accent, width=3)
+        mark.pack(side="left", padx=(0, t.sp("md")))
+        titles = tk.Frame(head, background=t.bg_app)
+        titles.pack(side="left")
+        tk.Label(titles, text="Security receipt", background=t.bg_app, foreground=t.fg_primary,
+                 font=t.font("title")).pack(anchor="w")
+        tk.Label(titles, text="Message you sent" if sent else f"Message you received from "
+                 f"{receipt.get('sender')}", background=t.bg_app, foreground=t.fg_secondary,
+                 font=t.font("caption")).pack(anchor="w")
 
-        # (label, value, color, monospace)
-        sender_text = f"{receipt.get('sender')}  ({receipt.get('sender_fingerprint') or 'no fingerprint'})"
-        rows = [("Sender", sender_text, t.fg_primary, False)]
-        if sent:
-            rows.append(("Signature", "✔ signed with your private key (RSA-PSS / SHA-256)",
-                         t.fg_accent, False))
-            rows.append(("Encryption", "✔ AES-256-GCM, fresh nonce per message",
-                         t.fg_accent, False))
-            rows.append(("Sent at", time.strftime("%H:%M:%S", time.localtime(
-                receipt.get("timestamp", 0))), t.fg_primary, False))
-            rows.append(("Chain position", f"seq #{receipt.get('seq')}  (your direction)",
-                         t.fg_primary, False))
-            rows.append(("prev_hash (signed)", short(receipt.get("prev_hash")), t.fg_primary, True))
-        else:
-            rows.append(("AES-GCM tag", "✔ verified (not tampered with in transit)",
-                         t.fg_accent, False))
-            rows.append(("RSA signature", "✔ verified against the sender's public key",
-                         t.fg_accent, False))
-            rows.append(("Timestamp", f"✔ fresh  ({receipt.get('age_seconds', 0)} s old when received)",
-                         t.fg_accent, False))
-            if receipt.get("chain_link") == "gap":
-                rows.append(("Chain position", f"seq #{receipt.get('seq')}  ⚠ earlier message(s) "
-                             f"missing before this one", t.fg_warning, False))
+        # -- the checks this message passed (green), or was flagged on (amber) --
+        checks = widgets.make_card(body, t, padx="md", pady="sm")
+        checks.pack(fill="x")
+        for kind, title, detail in receipt_rows(receipt):
+            color = t.success if kind == "ok" else t.warning
+            row = tk.Frame(checks, background=t.bg_panel)
+            row.pack(fill="x", pady=t.sp("xs"))
+            size = t.sp(22)
+            badge = tk.Canvas(row, width=size, height=size, background=t.bg_panel,
+                              highlightthickness=0)
+            badge.create_oval(1, 1, size - 1, size - 1, fill=color, outline="")
+            if kind == "ok":
+                widgets.draw_check(badge, size / 2, size / 2 + 1, size * 0.8, "#052e16", width=2)
             else:
-                rows.append(("Chain position", f"seq #{receipt.get('seq')}  ✔ links to the "
-                             f"previous message", t.fg_accent, False))
-            rows.append(("prev_hash", short(receipt.get("prev_hash")), t.fg_primary, True))
-        rows.append(("Nonce", short(receipt.get("nonce")), t.fg_primary, True))
-        rows.append(("Record SHA-256", short(receipt.get("record_hash")), t.fg_primary, True))
+                badge.create_text(size / 2, size / 2, text="!", fill="#2b1d00",
+                                  font=t.font("caption_bold"))
+            badge.pack(side="left", anchor="n", padx=(0, t.sp("md")))
+            text = tk.Frame(row, background=t.bg_panel)
+            text.pack(side="left", fill="x", expand=True)
+            tk.Label(text, text=title, background=t.bg_panel, foreground=color,
+                     font=t.font("body_bold"), anchor="w").pack(anchor="w")
+            tk.Label(text, text=detail, background=t.bg_panel, foreground=t.fg_secondary,
+                     font=t.font("caption"), anchor="w", justify="left",
+                     wraplength=t.sp(380)).pack(anchor="w")
 
-        for i, (label, value, color, mono) in enumerate(rows, start=2):
-            tk.Label(body, text=label, background=t.bg_panel, foreground=t.fg_secondary,
-                     font=(t.ui_font, t.size(10)), anchor="w").grid(
-                row=i, column=0, sticky="nw", padx=(0, 18), pady=3)
-            tk.Label(body, text=value, background=t.bg_panel, foreground=color,
-                     font=(t.mono_font if mono else t.ui_font, t.size(10)),
-                     anchor="w", justify="left", wraplength=360).grid(
-                row=i, column=1, sticky="w", pady=3)
+        # -- technical values: truncated, with a Copy button for the full value --
+        details = widgets.make_card(body, t, padx="md", pady="sm")
+        details.pack(fill="x", pady=(t.sp("md"), 0))
+        details.columnconfigure(1, weight=1)
+        for r, (label, value, mono) in enumerate(receipt_details(receipt)):
+            tk.Label(details, text=label, background=t.bg_panel, foreground=t.fg_hint,
+                     font=t.font("caption"), anchor="w").grid(row=r, column=0, sticky="w",
+                                                              padx=(0, t.sp("md")), pady=t.sp("xs"))
+            tk.Label(details, text=shorten(value) if mono else value, background=t.bg_panel,
+                     foreground=t.fg_primary, font=t.font("mono_small" if mono else "caption"),
+                     anchor="w", justify="left", wraplength=t.sp(300)).grid(
+                row=r, column=1, sticky="w", pady=t.sp("xs"))
+            if mono and value != "-":
+                copy = widgets.flat_button(details, t, "Copy", lambda: None,
+                                           background=t.bg_panel)
+                # re-bind (replaces flat_button's click) so the label itself can show "Copied"
+                copy.bind("<Button-1>", lambda _e, v=value, w=copy: self._copy_value(w, v))
+                copy.grid(row=r, column=2, sticky="e", padx=(t.sp("sm"), 0))
 
-        ttk.Button(body, text="Close", command=win.destroy).grid(
-            row=len(rows) + 2, column=0, columnspan=2, sticky="e", pady=(16, 0))
+        # -- the plain-English verdict --
+        kind, sentence = receipt_summary(receipt)
+        color, bg = (t.success, t.bg_success_soft) if kind == "ok" else (t.warning, t.bg_warning_soft)
+        verdict = tk.Frame(body, background=bg, highlightbackground=color, highlightcolor=color,
+                           highlightthickness=1, padx=t.sp("md"), pady=t.sp("sm"))
+        verdict.pack(fill="x", pady=(t.sp("md"), 0))
+        tk.Label(verdict, text=sentence, background=bg, foreground=t.fg_primary,
+                 font=t.font("body_bold"), anchor="w", justify="left",
+                 wraplength=t.sp(430)).pack(anchor="w")
 
         win.update_idletasks()
-        x = self.winfo_rootx() + (self.winfo_width() - win.winfo_width()) // 2
-        y = self.winfo_rooty() + 80
+        x = self.winfo_rootx() + max((self.winfo_width() - win.winfo_width()) // 2, 0)
+        y = self.winfo_rooty() + 70
         win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
         return win
+
+    def _copy_value(self, button, value):
+        widgets.copy_to_clipboard(self, value)
+        button.config(text="Copied ✓")
+        self.after(1200, lambda: button.winfo_exists() and button.config(text="Copy"))
 
     # --- Attack Lab (Stage C) --------------------------------------------------
     #

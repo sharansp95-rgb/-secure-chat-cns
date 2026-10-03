@@ -225,3 +225,68 @@ def lab_status(state, action, peer, detail=None):
         "silent": ("warn", f"No report from {peer} yet. Watch {peer}'s window."),
         "rejected": ("bad", f"Rejected: {detail}"),
     }[state]
+
+
+# --- Security receipt -------------------------------------------------------------------
+#
+# A receipt exists only for a message that already passed EVERY client-side check (the
+# client attaches it to message_sent / message_received). These functions only word what
+# those checks verified; they never re-check anything.
+
+
+def receipt_rows(receipt):
+    """[(kind, title, detail)] -- one row per check. kind is "ok" or "warn"."""
+    if receipt.get("direction") == "sent":
+        return [
+            ("ok", "Signed by you", "RSA-PSS / SHA-256 with your private key"),
+            ("ok", "Encrypted", "AES-256-GCM with a fresh nonce for every message"),
+            ("ok", "Chained", f"Message #{receipt.get('seq')} in your direction, linked to your "
+                              f"previous message"),
+        ]
+    sender = receipt.get("sender") or "the sender"
+    rows = [
+        ("ok", "Not tampered with", "AES-256-GCM authentication tag verified"),
+        ("ok", f"Really from {sender}", "RSA signature verified against their public key"),
+        ("ok", "Fresh", f"Arrived {receipt.get('age_seconds', 0)} s after it was sent, inside "
+                        f"the freshness window"),
+    ]
+    if receipt.get("chain_link") == "gap":
+        rows.append(("warn", "Earlier message missing",
+                     f"Message #{receipt.get('seq')} arrived, but earlier messages are missing "
+                     f"before it"))
+    else:
+        rows.append(("ok", "In order", f"Message #{receipt.get('seq')} links to the one before it"))
+    return rows
+
+
+def receipt_summary(receipt):
+    """(kind, one plain-English sentence) for the bottom of the receipt."""
+    if receipt.get("direction") == "sent":
+        return ("ok", "This message was signed with your key, encrypted, and chained to your "
+                      "previous message. Your peer's client verifies it when it arrives.")
+    if receipt.get("chain_link") == "gap":
+        return ("warn", "This message is authentic and unmodified, but earlier messages are "
+                        "missing before it.")
+    return ("ok", "This message is authentic, unmodified, fresh, and in order.")
+
+
+def receipt_details(receipt):
+    """[(label, full value, is_mono)] for the technical values; each gets a Copy button."""
+    import time as _time
+    sent = receipt.get("direction") == "sent"
+    details = [("Sender", f"{receipt.get('sender')}  ({receipt.get('sender_fingerprint') or 'no fingerprint'})",
+                False)]
+    if receipt.get("timestamp") is not None:
+        stamp = _time.strftime("%H:%M:%S", _time.localtime(float(receipt["timestamp"])))
+        details.append(("Sent at" if sent else "Sent by peer at", stamp, False))
+    details += [
+        ("Nonce", receipt.get("nonce") or "-", True),
+        ("prev_hash", receipt.get("prev_hash") or "-", True),
+        ("Record SHA-256", receipt.get("record_hash") or "-", True),
+    ]
+    return details
+
+
+def shorten(value, n=22):
+    value = value or "-"
+    return value if len(value) <= n else value[:n] + "…"

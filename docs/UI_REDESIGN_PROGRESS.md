@@ -83,7 +83,7 @@ and pushed; the working tree was clean when this file was written.
 | 4 "What just happened?" banners + Explain events toggle | **DONE** | `e3bac32` |
 | (test-stability fix, see section 5) | **DONE**, committed with this file | next commit |
 | 5 Attack Lab panel | **DONE** | see `git log` ("gui(attack lab)") |
-| 6 Security receipt | **NOT STARTED** | |
+| 6 Security receipt | **DONE** | see `git log` ("gui(receipt)") |
 | 7 Security dashboard | **NOT STARTED** | |
 | 8 Presentation mode + launcher layout | **NOT STARTED** (theme side is ready, see below) | |
 | 9 Verify, "after" screenshots 01-10, README.pdf, comparison image | **NOT STARTED** | |
@@ -107,7 +107,7 @@ Nothing was left half-edited: the working tree was clean at the end of step 4.
 - `gui/explain.py` (pure, no Tk): `describe_rejection()` (headline, explanation, the check that caught it), `banner_for()` (the six banner texts + an info banner for the attacker window), constants `REJECTIONS`, `HANDSHAKE_SIGNATURE`, `BANNER_TEXT`.
 - `gui/chat_gui.py`: login screen (`validate_login_form`, `_set_login_busy`, `StepList` progress, hand-off buffering via `_chat_ready`/`_held_events`), chat screen (`_items` list re-rendered by `_rerender_items()`; `_add_message`, `_add_blocked_card`, `_add_system_notice`; header chips; network view toggle; banner strip `_show_banner`; settings menu `settings_menu` with `explain_var`). `_open_attack_lab`, `_show_receipt`, `_LAB_ACTIONS`, `_arm_lab_action` are still the OLD (pre-redesign) versions.
 - `gui/security_dashboard.py`: **untouched, old design**.
-- Tests added/updated: `tests/test_theme.py`, `tests/test_gui_login.py`, `tests/test_gui_chat.py`, `tests/test_gui_banners.py`, `tests/test_gui_layout.py` (rewritten for the new header/input; dashboard tests unchanged). Suite: **229 passed** (added `tests/test_gui_attack_lab.py`).
+- Tests added/updated: `tests/test_theme.py`, `tests/test_gui_login.py`, `tests/test_gui_chat.py`, `tests/test_gui_banners.py`, `tests/test_gui_layout.py` (rewritten for the new header/input; dashboard tests unchanged). Suite: **242 passed** (added `tests/test_gui_attack_lab.py`, `tests/test_gui_receipt.py`).
 
 ## 4. Decisions made so far
 
@@ -158,3 +158,8 @@ The scripts used lived in the session scratchpad (`.../scratchpad/ui/`: `safe_se
 - The Attack Lab panel has no Close button on purpose (Esc / title-bar close) to keep it short: ~640 px tall at normal size, ~800 px in Presentation mode. Panel width ~700 px.
 - The settings button (gear) renders wide with a dropdown arrow (~70 px); fine, optional polish.
 - **Exact next action: Step 6 (security receipt)** -- replace `_show_receipt` in `gui/chat_gui.py` (still the old layout) with the card layout: green check rows (received: AES-GCM tag verified / RSA signature verified / fresh / chain link ok-or-gap; sent: signed / encrypted / chained), mono values (nonce, prev_hash, record SHA-256) truncated with a **Copy** button that copies the FULL value, and the bottom line "This message is authentic, unmodified, fresh, and in order." (gap variant: authentic and unmodified but earlier messages are missing; sent variant: signed, encrypted and chained, peer verifies on arrival). Receipt dict keys: direction, sender, sender_fingerprint, timestamp, seq, prev_hash, record_hash, nonce, age_seconds, chain_link. Then add `tests/test_gui_receipt.py`, run the suite (to a file, check the exit code), commit, push, update this file.
+
+## 9. Update after Step 6 (receipt) -- read this first
+
+- Built: `gui/explain.py` has `receipt_rows`, `receipt_summary`, `receipt_details`, `shorten` (pure); `gui/chat_gui.py` has the new `_show_receipt` (shield + check header, green/amber check rows, a details card with truncated mono values and **Copy** buttons that copy the FULL value, a green/amber plain-English verdict) and `_copy_value`. Receipt window is ~480x600 px at normal size (about 750 px tall in Presentation mode).
+- **Exact next action: Step 7 (security dashboard)** -- rewrite `gui/security_dashboard.py` (still the old design; its 3 tests in `tests/test_gui_layout.py` must keep passing or be updated: `path_var`, `paned`, `locked_list`, `locked_empty_label`, `SecurityDashboard(log_path=...)`, `--geometry`). Needed: a row of big KPI tiles (Attacks detected = count of `security_alert`; Failed logins = `failed_login`; Locked accounts = currently locked; Active users = distinct usernames in `user_login`/`user_registered`, labelled honestly, see section 4), tiles flash briefly when their value changes; colour-coded event feed with an icon per event type and a readable one-line description per event (put the wording in a pure function in `gui/explain.py`, e.g. `describe_log_event(event) -> (glyph, severity, text)`), click a feed row to show the raw `key=value` details; Locked accounts list with a live countdown that ticks every second (separate 1 s timer from the 500 ms log poll). Log events written by the server: user_registered, user_login, failed_login, account_locked (retry_after, lock_level), lockout_rejected, address_rate_limited, non_tls_connection, malformed_envelope, lab_control_rejected, lab_attack_performed (action, target, armed_by), security_alert (reported_by, alert, reason, peer, seq). Add `tests/test_gui_dashboard.py`, run the suite (to a file, check the exit code), commit, push, update this file.
