@@ -182,10 +182,25 @@ def test_short_window_goes_compact_and_the_feed_keeps_its_room(make):
                      geometry="1000x330+10000+10000")
     window.update()
     assert window._compact and not window._subtitle.winfo_ismapped()
-    assert window.feed_text.winfo_height() >= 70, window.feed_text.winfo_height()
+    assert window.feed_text.winfo_height() >= 100, window.feed_text.winfo_height()
     window.geometry("1000x620+10000+10000")
     window.update()
     assert not window._compact and window._subtitle.winfo_ismapped()
+    assert window._feed_hint.winfo_ismapped()
+
+
+def test_launcher_strip_height_still_shows_several_feed_rows(make):
+    """demo/start_demo.sh gives the dashboard ~267px of height on a MacBook Air: the feed
+    must still have room for a handful of rows next to the tiles."""
+    window, _ = make([ev("failed_login", username="x", ts=time.time())] * 3,
+                     geometry="1026x267+10000+10000")
+    window.update()
+    assert window._compact
+    assert window.feed_text.winfo_height() >= 90, window.feed_text.winfo_height()
+    assert all(tile.winfo_ismapped() for tile, _n in window._tiles.values())
+    bottom = window.winfo_rooty() + window.winfo_height()
+    assert window.feed_text.winfo_rooty() + window.feed_text.winfo_height() <= bottom, "feed runs off the window"
+    assert window.paned.winfo_rooty() + window.paned.winfo_height() <= bottom
 
 
 def test_tiles_and_panes_fit_the_launcher_width(make):

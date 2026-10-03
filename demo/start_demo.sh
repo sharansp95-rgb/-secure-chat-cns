@@ -14,6 +14,13 @@
 #   demo/start_demo.sh --wireshark   also start a live Wireshark capture of
 #                                    the demo port BEFORE anything connects
 #                                    (combine: --simple --wireshark)
+#   demo/start_demo.sh --presentation  Presentation mode in every GUI window
+#                                    (~25% larger text, for a projector); you can
+#                                    also toggle it in any window with Cmd+Shift+P
+#
+# Windows are tiled to fit THIS screen (demo/layout.py): two chat windows side by
+# side, the dashboard below them and the server's Terminal window beside it, so
+# nothing is hidden behind anything else.
 #
 # Stop it again with demo/stop_demo.sh. Double-clickable twin:
 # demo/start_demo.command.
@@ -23,13 +30,15 @@ PORT=5000
 LAB=1
 SIMPLE=0
 WIRESHARK=0
+PRESENTATION=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-lab) LAB=0; shift ;;
         --simple) SIMPLE=1; shift ;;
         --wireshark) WIRESHARK=1; shift ;;
+        --presentation) PRESENTATION=1; shift ;;
         --port)   PORT="${2:-}"; shift 2 ;;
-        -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
     esac
 done
@@ -78,6 +87,21 @@ else
     echo "    certificate regenerated, fingerprint $FP"
 fi
 
+# --- window layout: tiled to the VISIBLE frame of this screen (menu bar and Dock excluded) ---
+screen_frame() {
+    osascript -l JavaScript -e 'ObjC.import("AppKit"); var s=$.NSScreen.mainScreen; var f=s.visibleFrame; var a=s.frame; [Math.round(f.origin.x), Math.round(a.size.height-(f.origin.y+f.size.height)), Math.round(f.size.width), Math.round(f.size.height)].join(" ")' 2>/dev/null
+}
+SCREEN="$(screen_frame)"
+case "$SCREEN" in
+    [0-9]*" "[0-9]*" "[0-9]*" "[0-9]*) ;;
+    *) SCREEN="0 25 1280 775" ;;     # safe fallback if the screen cannot be queried
+esac
+PRESFLAG=""; LAYOUT_FLAGS=""
+[ "$PRESENTATION" = 1 ] && { PRESFLAG="--presentation"; LAYOUT_FLAGS="--presentation"; }
+[ "$SIMPLE" = 1 ] && LAYOUT_FLAGS="$LAYOUT_FLAGS --simple"
+eval "$("$PY" demo/layout.py $SCREEN $LAYOUT_FLAGS)"
+echo "    screen $SCREEN -> windows tiled$( [ "$OVERLAP" = 1 ] && echo " (screen too small to tile without overlap: click a title bar to raise a window)" )"
+
 LABFLAG=""; MODE="normal mode"
 [ "$LAB" = 1 ] && { LABFLAG="--lab"; MODE="Attack Lab ON"; }
 
@@ -125,10 +149,8 @@ if [ "$SIMPLE" = 1 ]; then
     fi
     echo "    server is up and its certificate matches certs/server.crt"
     echo "[5/5] Opening the sender and receiver windows"
-    read -r W H <<<"$(osascript -e 'tell application "Finder" to get bounds of window of desktop' 2>/dev/null | awk -F', *' 'NF==4{print $3, $4}')"
-    W="${W:-1280}"
-    nohup "$PY" gui/chat_gui.py --port "$PORT" --geometry "780x540+10+60" >/dev/null 2>&1 &
-    nohup "$PY" gui/chat_gui.py --port "$PORT" --geometry "780x540+$(( W - 790 ))+90" >/dev/null 2>&1 &
+    nohup "$PY" gui/chat_gui.py --port "$PORT" --geometry "$CHAT_A_GEOM" $PRESFLAG >/dev/null 2>&1 &
+    nohup "$PY" gui/chat_gui.py --port "$PORT" --geometry "$CHAT_B_GEOM" $PRESFLAG >/dev/null 2>&1 &
     cat <<MSG
 
 === Demo is running (simple mode) ===
@@ -142,21 +164,6 @@ MSG
 fi
 
 [ "$WIRESHARK" = 1 ] && { echo "Starting the Wireshark capture"; start_wireshark; }
-
-# --- window layout (points); screen size from Finder, with a safe fallback --
-#   top-left: chat A    top-right: chat B (slight overlap on screens narrower
-#   than ~1580pt -- click a title bar to raise either)
-#   bottom-left: dashboard    bottom-right: server + three small status windows
-read -r W H <<<"$(osascript -e 'tell application "Finder" to get bounds of window of desktop' 2>/dev/null | awk -F', *' 'NF==4{print $3, $4}')"
-W="${W:-1280}"; H="${H:-800}"
-GUI_W=780; GUI_H=540
-DASH_W=700; DASH_H=340
-DASH_Y=$(( 30 + GUI_H + 10 ))
-TERM_X1=$(( DASH_W + 20 )); TERM_X2=$(( W - 10 ))
-TERM_TOP=$(( 55 + GUI_H + 10 )); TERM_BOT=$(( H - 30 ))
-[ "$TERM_BOT" -lt $(( TERM_TOP + 200 )) ] && TERM_BOT=$(( TERM_TOP + 200 ))
-SERVER_BOT=$(( TERM_TOP + (TERM_BOT - TERM_TOP) * 55 / 100 ))
-ST_W=$(( (TERM_X2 - TERM_X1) / 3 ))
 
 open_terminal() {  # title  command  x1 y1 x2 y2
     # `activate` first: otherwise Terminal's "front window" can still be an
@@ -174,7 +181,7 @@ OSA
 }
 
 echo "[3/5] Opening the server window ($MODE, port $PORT)"
-open_terminal "$TITLE_PREFIX · 1 Server (port $PORT)" "python server/server.py $LABFLAG --port $PORT" "$TERM_X1" "$TERM_TOP" "$TERM_X2" "$SERVER_BOT"
+open_terminal "$TITLE_PREFIX · Server (port $PORT)" "python server/server.py $LABFLAG --port $PORT" $SERVER_BOUNDS
 
 echo "[4/5] Waiting for the server to accept TLS connections"
 if ! wait_for_server
@@ -185,20 +192,22 @@ fi
 echo "    server is up and its certificate matches certs/server.crt"
 
 echo "[5/5] Opening chat windows A and B and the security dashboard"
-open_terminal "$TITLE_PREFIX · 2 Chat window A" "python gui/chat_gui.py --port $PORT --geometry ${GUI_W}x${GUI_H}+10+30" "$TERM_X1" $(( SERVER_BOT + 8 )) $(( TERM_X1 + ST_W - 4 )) "$TERM_BOT"
-open_terminal "$TITLE_PREFIX · 3 Chat window B" "python gui/chat_gui.py --port $PORT --geometry ${GUI_W}x${GUI_H}+$(( W - GUI_W - 10 ))+55" $(( TERM_X1 + ST_W )) $(( SERVER_BOT + 8 )) $(( TERM_X1 + 2 * ST_W - 4 )) "$TERM_BOT"
-open_terminal "$TITLE_PREFIX · 4 Dashboard" "python gui/security_dashboard.py --geometry ${DASH_W}x${DASH_H}+10+${DASH_Y}" $(( TERM_X1 + 2 * ST_W )) $(( SERVER_BOT + 8 )) "$TERM_X2" "$TERM_BOT"
+nohup "$PY" gui/chat_gui.py --port "$PORT" --geometry "$CHAT_A_GEOM" $PRESFLAG >/dev/null 2>&1 &
+nohup "$PY" gui/chat_gui.py --port "$PORT" --geometry "$CHAT_B_GEOM" $PRESFLAG >/dev/null 2>&1 &
+nohup "$PY" gui/security_dashboard.py --geometry "$DASH_GEOM" $PRESFLAG >/dev/null 2>&1 &
 
 cat <<MSG
 
 === Demo is running ===
  Server        : 127.0.0.1:$PORT over TLS, cert fingerprint $FP, $MODE
- Windows       : chat A (top-left), chat B (top-right), the dashboard
-                 (bottom-left); the four Terminal windows are bottom-right.
-                 Click any window's title bar to bring it to the front.
+ Windows       : chat A (top-left), chat B (top-right), the security dashboard
+                 (bottom-left) and the server's Terminal window (bottom-right),
+                 tiled to this screen so nothing is hidden.
  What to do    : in window A log in (or Register) as one user and name the
                  OTHER user as "Peer"; in window B do the reverse. Once both
                  show a fingerprint, send a message, click a bubble for its
                  security receipt$( [ "$LAB" = 1 ] && echo ", open Attack Lab, and watch the dashboard" ).
+ Projector     : Cmd+Shift+P toggles Presentation mode in any window
+                 (or start with demo/start_demo.sh --presentation).
  When finished : demo/stop_demo.sh   (stops only our server and windows)
 MSG

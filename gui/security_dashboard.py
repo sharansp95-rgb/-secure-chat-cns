@@ -29,6 +29,7 @@ POLL_INTERVAL_MS = 500       # how often the log is re-read (only when it change
 TICK_INTERVAL_MS = 1000      # countdown refresh
 FLASH_MS = 1400              # how long a KPI tile stays highlighted after it changes
 FEED_MAX_LINES = 500
+DASH_MIN_HEIGHT = 240
 COMPACT_BELOW_HEIGHT = 520   # windows shorter than this drop the subtitle and tile captions
 
 KPI_TILES = [
@@ -38,6 +39,8 @@ KPI_TILES = [
     ("locked_accounts", "Locked accounts", "right now", "danger"),
     ("active_users", "Active users", "seen in this log", "success"),
 ]
+COMPACT_LABELS = {"attacks_detected": "Attacks", "failed_logins": "Failed logins",
+                  "locked_accounts": "Locked", "active_users": "Active users"}
 
 
 class SecurityDashboard(tk.Tk):
@@ -46,7 +49,7 @@ class SecurityDashboard(tk.Tk):
         self.log_path = log_path
         self.title("Security Dashboard")
         self.geometry("920x620")
-        self.minsize(640, 400)
+        self.minsize(640, DASH_MIN_HEIGHT)
 
         self.theme = Theme(self)
         self.configure(background=self.theme.bg_app)
@@ -60,10 +63,15 @@ class SecurityDashboard(tk.Tk):
         self._selected_row = None
         self._kpi_values = {}
         self._captions = []          # (caption label, number label) per KPI tile
-        self._compact = False        # short window: drop the subtitle and tile captions
+        self._tile_parts = {}        # key -> (title label, number label)
+        self._compact = False        # short window: one-line header, inline tiles, no captions
+        self._density_applied = False
         self._locked = {}            # username -> {"locked_until", "lock_level", "remaining"}
 
+        self.presentation_var = tk.BooleanVar(value=False)
         self._build_layout()
+        self._build_menubar()
+        widgets.install_presentation_shortcuts(self, self.toggle_presentation)
         # ttk.Panedwindow takes its initial split from requested widths, which left the
         # Locked accounts pane too narrow for its own title and text. (Realize the window
         # first: before it is mapped the pane is ~1px wide and Tk clamps the sash to that.)
@@ -83,8 +91,9 @@ class SecurityDashboard(tk.Tk):
         self.header_frame = header
         top = tk.Frame(header, background=t.bg_panel)
         top.pack(fill="x")
-        tk.Label(top, text="Security Dashboard", background=t.bg_panel, foreground=t.fg_primary,
-                 font=t.font("title")).pack(side="left")
+        self._title_label = tk.Label(top, text="Security Dashboard", background=t.bg_panel,
+                                     foreground=t.fg_primary, font=t.font("title"))
+        self._title_label.pack(side="left")
         widgets.Chip(top, t, "READ-ONLY", "warn").pack(side="left", padx=(t.sp("md"), 0))
         self._header_top = top
         self._subtitle = tk.Label(header, text="Not connected to the server: it only reads the "
@@ -98,11 +107,13 @@ class SecurityDashboard(tk.Tk):
         if shown.startswith(".."):
             shown = self.log_path
         self.path_var = tk.StringVar(value=f"watching: {shown}")
-        tk.Label(header, textvariable=self.path_var, background=t.bg_panel,
-                 foreground=t.fg_hint, font=t.font("mono_small"), anchor="w").pack(anchor="w")
+        self._path_label = tk.Label(header, textvariable=self.path_var, background=t.bg_panel,
+                                    foreground=t.fg_hint, font=t.font("mono_small"), anchor="w")
+        self._path_label.pack(anchor="w")
 
         body = tk.Frame(self, background=t.bg_app, padx=t.sp("md"), pady=t.sp("md"))
         body.pack(fill="both", expand=True)
+        self._body = body
 
         # -- KPI tiles --
         self.kpi_row = tk.Frame(body, background=t.bg_app)
@@ -114,9 +125,9 @@ class SecurityDashboard(tk.Tk):
                             highlightbackground=t.bg_panel, highlightcolor=t.bg_panel)
             tile.grid(row=0, column=column, sticky="nsew",
                       padx=(0 if column == 0 else t.sp("sm"), 0))
-            tk.Label(tile, text=label, background=t.bg_panel, foreground=t.fg_secondary,
-                     font=t.font("body_bold"), anchor="w").pack(
-                anchor="w", padx=t.sp("md"), pady=(t.sp("sm"), 0))
+            title_label = tk.Label(tile, text=label, background=t.bg_panel,
+                                   foreground=t.fg_secondary, font=t.font("body_bold"), anchor="w")
+            title_label.pack(anchor="w", padx=t.sp("md"), pady=(t.sp("sm"), 0))
             number = tk.Label(tile, text="0", background=t.bg_panel, foreground=t.fg_primary,
                               font=t.font("display"), anchor="w")
             number.pack(anchor="w", padx=t.sp("md"))
@@ -126,6 +137,7 @@ class SecurityDashboard(tk.Tk):
             caption_label.pack(anchor="w", padx=t.sp("md"), pady=(0, t.sp("sm")))
             self._tiles[key] = (tile, number)
             self._captions.append((caption_label, number))
+            self._tile_parts[key] = (title_label, number)
 
         # -- split pane: locked accounts (left) / live feed (right) --
         paned = ttk.Panedwindow(body, orient="horizontal")
@@ -145,12 +157,13 @@ class SecurityDashboard(tk.Tk):
         self.paned = paned
 
         feed_pane = tk.Frame(paned, background=t.bg_panel_alt)
-        tk.Label(feed_pane, text="Live event feed", background=t.bg_panel_alt,
-                 foreground=t.fg_secondary, font=t.font("body_bold")).pack(
-            anchor="w", padx=t.sp("md"), pady=(t.sp("sm"), 0))
-        tk.Label(feed_pane, text="click an event for its raw details", background=t.bg_panel_alt,
-                 foreground=t.fg_hint, font=t.font("caption")).pack(
-            anchor="w", padx=t.sp("md"), pady=(0, t.sp("xs")))
+        self._feed_title = tk.Label(feed_pane, text="Live event feed", background=t.bg_panel_alt,
+                                    foreground=t.fg_secondary, font=t.font("body_bold"))
+        self._feed_title.pack(anchor="w", padx=t.sp("md"), pady=(t.sp("sm"), 0))
+        self._feed_hint = tk.Label(feed_pane, text="click an event for its raw details",
+                                   background=t.bg_panel_alt, foreground=t.fg_hint,
+                                   font=t.font("caption"))
+        self._feed_hint.pack(anchor="w", padx=t.sp("md"), pady=(0, t.sp("xs")))
         self.detail_var = tk.StringVar(value="")
         self.detail_label = tk.Label(feed_pane, textvariable=self.detail_var,
                                      background=t.bg_raised, foreground=t.fg_primary,
@@ -180,6 +193,43 @@ class SecurityDashboard(tk.Tk):
         self.feed_text.tag_raise("selected")
         paned.add(feed_pane, weight=1)
 
+    # --- Presentation mode (bigger fonts and padding for a projector) ------------------------
+
+    def _build_menubar(self):
+        menubar = tk.Menu(self)
+        view = tk.Menu(menubar, tearoff=0)
+        view.add_checkbutton(label="Presentation mode", accelerator=widgets.PRESENTATION_ACCELERATOR,
+                             variable=self.presentation_var, command=self._on_presentation_menu)
+        menubar.add_cascade(label="View", menu=view)
+        self.config(menu=menubar)
+        self.view_menu = view
+
+    def toggle_presentation(self):
+        self.set_presentation(not self.theme.presentation)
+
+    def _on_presentation_menu(self):
+        self.set_presentation(self.presentation_var.get())
+
+    def set_presentation(self, on):
+        """~25% larger fonts and padding (or back); the window grows with it, never past the
+        screen. Compact mode's height threshold scales with it."""
+        on = bool(on)
+        self.presentation_var.set(on)
+        if on == self.theme.presentation:
+            return
+        ratio = self.theme.set_presentation(on)
+        widgets.rescale_tree(self, ratio)
+        t = self.theme
+        for caption, _number in self._captions:
+            caption.config(wraplength=t.sp(130))
+        self.locked_empty_label.config(wraplength=t.sp(200))
+        widgets.scale_window(self, ratio)
+        self.minsize(self.minsize()[0], DASH_MIN_HEIGHT)    # height min does not scale: compact mode
+        self.update_idletasks()
+        self.paned.sashpos(0, max(t.sp(240), int(self.paned.winfo_width() * 0.28)))
+        self._apply_density()
+        self._render_locked()
+
     # --- density: a short window (e.g. the launcher's bottom strip) gives the feed the room ---
 
     def _on_configure(self, event):
@@ -187,20 +237,45 @@ class SecurityDashboard(tk.Tk):
             self._apply_density()
 
     def _apply_density(self):
-        compact = self.winfo_height() < COMPACT_BELOW_HEIGHT
-        if compact == self._compact and self._subtitle.winfo_manager() != (
-                "" if compact else None):
+        """Short window (the launcher's bottom strip): one-line header, tiles shown as
+        "label ........ number" rows, no captions or hints -- the feed gets the room."""
+        compact = self.winfo_height() < COMPACT_BELOW_HEIGHT * self.theme.factor
+        if compact == self._compact and self._density_applied:
             return
-        self._compact = compact
+        self._compact, self._density_applied = compact, True
+        t = self.theme
+        self.header_frame.configure(pady=t.sp("xs") if compact else t.sp("md"))
+        self._body.configure(pady=t.sp("xs") if compact else t.sp("md"))
+        self.kpi_row.pack_configure(pady=(0, t.sp("xs") if compact else t.sp("md")))
+        self._title_label.configure(font=t.font("heading" if compact else "title"))
+        self._path_label.pack_forget()
+        if compact:                                    # path moves up beside the title: one-line header
+            self._path_label.pack(in_=self._header_top, side="left", padx=(t.sp("md"), 0))
+        else:
+            self._path_label.pack(anchor="w", in_=self.header_frame)
+        for key, (title_label, number) in self._tile_parts.items():
+            title_label.pack_forget()
+            number.pack_forget()
+            label_text = next(l for k, l, _c, _col in KPI_TILES if k == key)
+            if compact:
+                title_label.configure(text=COMPACT_LABELS[key])
+                title_label.pack(side="left", padx=(t.sp("md"), t.sp("sm")), pady=t.sp("xs"))
+                number.pack(side="right", padx=(0, t.sp("md")))
+            else:
+                title_label.configure(text=label_text)
+                title_label.pack(anchor="w", padx=t.sp("md"), pady=(t.sp("sm"), 0))
+                number.pack(anchor="w", padx=t.sp("md"))
         if compact:
             self._subtitle.pack_forget()
+            self._feed_hint.pack_forget()
             for caption, _number in self._captions:
                 caption.pack_forget()
         else:
             self._subtitle.pack(anchor="w", after=self._header_top)
+            self._feed_hint.pack(anchor="w", padx=t.sp("md"), pady=(0, t.sp("xs")),
+                                 after=self._feed_title)
             for caption, number in self._captions:
-                caption.pack(anchor="w", padx=self.theme.sp("md"), pady=(0, self.theme.sp("sm")),
-                             after=number)
+                caption.pack(anchor="w", padx=t.sp("md"), pady=(0, t.sp("sm")), after=number)
 
     # --- polling: read whatever is new in the log, render it ----------------------------
 
@@ -318,8 +393,12 @@ def main():
                                                   "logs/security_events.jsonl")
     parser.add_argument("--log-path", default=DEFAULT_LOG_PATH)
     parser.add_argument("--geometry", help="initial window size/position, e.g. 700x480+560+40")
+    parser.add_argument("--presentation", action="store_true",
+                        help="start in Presentation mode (~25% larger text and padding, for a projector)")
     args = parser.parse_args()
     app = SecurityDashboard(log_path=args.log_path)
+    if args.presentation:
+        app.set_presentation(True)
     if args.geometry:
         app.geometry(args.geometry)
     app.mainloop()

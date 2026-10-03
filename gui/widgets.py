@@ -5,6 +5,7 @@ shared by gui/chat_gui.py and gui/security_dashboard.py so both windows look and
 the same (see gui/theme.py for the palette, spacing and type scales they use).
 """
 
+import sys
 import tkinter as tk
 from tkinter import ttk
 
@@ -108,10 +109,16 @@ class Logo(tk.Canvas):
         bg = background or theme.bg_panel
         super().__init__(parent, width=size, height=size, background=bg,
                          highlightthickness=0, borderwidth=0)
+        self.theme = theme
+        self.resize(size)
+
+    def resize(self, size):
+        t = self.theme
+        self.delete("all")
+        self.configure(width=size, height=size)
         pad = size * 0.04
-        draw_shield(self, size / 2, size / 2, size - 2 * pad, fill=theme.bg_accent,
-                    outline=theme.accent)
-        draw_lock(self, size / 2, size * 0.50, size * 0.50, theme.fg_on_accent, theme.bg_accent)
+        draw_shield(self, size / 2, size / 2, size - 2 * pad, fill=t.bg_accent, outline=t.accent)
+        draw_lock(self, size / 2, size * 0.50, size * 0.50, t.fg_on_accent, t.bg_accent)
 
 
 class Avatar(tk.Canvas):
@@ -121,10 +128,16 @@ class Avatar(tk.Canvas):
     def __init__(self, parent, theme, name, size=36, background=None):
         super().__init__(parent, width=size, height=size, background=background or theme.bg_panel,
                          highlightthickness=0, borderwidth=0)
-        self.theme, self.size = theme, size
+        self.theme, self.size, self._name = theme, size, name
         self.set_name(name)
 
+    def resize(self, size):
+        self.size = size
+        self.configure(width=size, height=size)
+        self.set_name(self._name)
+
     def set_name(self, name):
+        self._name = name
         self.delete("all")
         s = self.size
         self.create_oval(1, 1, s - 1, s - 1, fill=self.theme.avatar_color(name), outline="")
@@ -370,3 +383,30 @@ class Field(tk.Frame):
     def set_error(self, flag):
         self.error = bool(flag)
         self._paint(self.focus_get() is self.entry)
+
+
+# ---------------------------------------------------------------------------------
+# Presentation mode plumbing shared by every window
+# ---------------------------------------------------------------------------------
+
+_MAC = sys.platform == "darwin"
+PRESENTATION_ACCELERATOR = "⌘⇧P" if _MAC else "Ctrl+Shift+P"
+
+
+def install_presentation_shortcuts(window, toggle):
+    """Bind Cmd+Shift+P (Ctrl+Shift+P elsewhere) to `toggle()` in this window."""
+    prefix = "Command" if _MAC else "Control"
+    for letter in ("P", "p"):
+        window.bind_all(f"<{prefix}-Shift-{letter}>", lambda _e: (toggle(), "break")[1])
+
+
+def scale_window(window, ratio, margin=24):
+    """Grow/shrink a window and its minimum size by `ratio`, never past the screen."""
+    window.update_idletasks()
+    screen_w, screen_h = window.winfo_screenwidth(), window.winfo_screenheight()
+    max_w, max_h = screen_w - margin, screen_h - margin - 33     # menu bar
+    min_w, min_h = window.minsize()
+    window.minsize(min(round(min_w * ratio), max_w), min(round(min_h * ratio), max_h))
+    width = max(window.winfo_width(), min_w)
+    height = max(window.winfo_height(), min_h)
+    window.geometry(f"{min(round(width * ratio), max_w)}x{min(round(height * ratio), max_h)}")

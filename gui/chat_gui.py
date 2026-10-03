@@ -237,8 +237,11 @@ class ChatGUI(tk.Tk):
         self._tls_fingerprint = None
         self._login_mode = "login"
 
+        self.presentation_var = tk.BooleanVar(value=False)   # View menu: Presentation mode
         self._build_login_screen()
         self._build_chat_screen()
+        self._build_menubar()
+        widgets.install_presentation_shortcuts(self, self.toggle_presentation)
         self._show_login_screen()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -258,13 +261,16 @@ class ChatGUI(tk.Tk):
         # -- brand row: drawn shield + name + tagline --
         brand = tk.Frame(card, background=t.bg_panel)
         brand.grid(row=0, column=0, sticky="ew", pady=(0, t.sp("lg")))
-        widgets.Logo(brand, t, size=t.sp(56)).pack(side="left", padx=(0, t.sp("md")))
+        self.login_logo = widgets.Logo(brand, t, size=t.sp(56))
+        self.login_logo.pack(side="left", padx=(0, t.sp("md")))
         names = tk.Frame(brand, background=t.bg_panel)
         names.pack(side="left", fill="x", expand=True)
         tk.Label(names, text="Secure Chat", background=t.bg_panel, foreground=t.fg_primary,
                  font=t.font("title"), anchor="w").pack(anchor="w")
-        tk.Label(names, text=TAGLINE, background=t.bg_panel, foreground=t.fg_secondary,
-                 font=t.font("caption"), wraplength=300, justify="left", anchor="w").pack(anchor="w")
+        self.tagline_label = tk.Label(names, text=TAGLINE, background=t.bg_panel,
+                                      foreground=t.fg_secondary, font=t.font("caption"),
+                                      wraplength=300, justify="left", anchor="w")
+        self.tagline_label.pack(anchor="w")
 
         self.host_var = tk.StringVar(value=DEFAULT_HOST)
         self.port_var = tk.StringVar(value=str(DEFAULT_PORT))
@@ -482,6 +488,9 @@ class ChatGUI(tk.Tk):
                                            command=self._on_explain_toggled)
         self.settings_menu.add_command(label="Show / hide network view",
                                        command=self._toggle_network)
+        self.settings_menu.add_checkbutton(
+            label=f"Presentation mode  ({widgets.PRESENTATION_ACCELERATOR})",
+            variable=self.presentation_var, command=self._on_presentation_menu)
         self.settings_button["menu"] = self.settings_menu
         self.settings_button.pack(side="right", padx=(t.sp("sm"), 0))
 
@@ -606,6 +615,56 @@ class ChatGUI(tk.Tk):
             for chip in (self.chip_e2e, self.chip_signed):
                 chip.set("bad")
         self._update_send_state()
+
+    # --- Presentation mode (bigger fonts and padding for a projector) ------------------------
+
+    def _build_menubar(self):
+        """A real menu-bar "View" menu, so Presentation mode is also reachable by menu."""
+        menubar = tk.Menu(self)
+        view = tk.Menu(menubar, tearoff=0)
+        view.add_checkbutton(label="Presentation mode", accelerator=widgets.PRESENTATION_ACCELERATOR,
+                             variable=self.presentation_var, command=self._on_presentation_menu)
+        view.add_checkbutton(label="Explain events", variable=self.explain_var,
+                             command=self._on_explain_toggled)
+        view.add_command(label="Show / hide network view", command=self._toggle_network)
+        menubar.add_cascade(label="View", menu=view)
+        self.config(menu=menubar)
+        self.view_menu = view
+
+    def toggle_presentation(self):
+        self.set_presentation(not self.theme.presentation)
+
+    def _on_presentation_menu(self):
+        self.set_presentation(self.presentation_var.get())
+
+    def set_presentation(self, on):
+        """Switch Presentation mode: every font and every bit of padding ~25% larger (or back),
+        the window grows with it (never past the screen), and the conversation is redrawn."""
+        on = bool(on)
+        self.presentation_var.set(on)
+        if on == self.theme.presentation:
+            return
+        lab_was_open = self._lab_window_alive()
+        for child in list(self.winfo_children()):        # Attack Lab / receipt: rebuilt on open
+            if isinstance(child, tk.Toplevel):
+                child.destroy()
+        ratio = self.theme.set_presentation(on)
+        widgets.rescale_tree(self, ratio)
+        t = self.theme
+        self.avatar.resize(t.sp(44))
+        self.login_logo.resize(t.sp(56))
+        self.tagline_label.config(wraplength=t.sp(300))
+        for _frame, _glyph, label in self.steps._rows:
+            label.config(wraplength=t.sp(360))
+        widgets.scale_window(self, ratio)
+        self.update_idletasks()
+        if self._chat_ready:
+            self._rerender_items()
+            self._fit_header()
+            if self._network_visible:
+                self.paned.sashpos(0, int(self.paned.winfo_width() * 0.58))
+        if lab_was_open:
+            self._open_attack_lab()
 
     # --- "What just happened?" banner ------------------------------------------------------
 
@@ -1640,12 +1699,16 @@ def main():
                         help="server port to pre-fill on the login screen "
                              f"(default {DEFAULT_PORT})")
     parser.add_argument("--geometry", help="initial window size/position, e.g. 780x560+10+40")
+    parser.add_argument("--presentation", action="store_true",
+                        help="start in Presentation mode (~25% larger text and padding, for a projector)")
     parser.add_argument("--log-path", default=None,
                         help="security event log the Attack Lab reads results from "
                              "(default: the server's logs/security_events.jsonl)")
     args = parser.parse_args()
     app = ChatGUI(log_path=args.log_path)
     app.port_var.set(str(args.port))
+    if args.presentation:
+        app.set_presentation(True)
     if args.geometry:
         app.geometry(args.geometry)
     app.mainloop()
