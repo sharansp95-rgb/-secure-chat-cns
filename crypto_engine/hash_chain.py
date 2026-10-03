@@ -127,11 +127,13 @@ class OutgoingChain:
 
 
 class ChainVerdict:
-    def __init__(self, status, expected_seq, got_seq, detail=""):
+    def __init__(self, status, expected_seq, got_seq, detail="", missing=0, explained=0):
         self.status = status
         self.expected_seq = expected_seq
         self.got_seq = got_seq
         self.detail = detail
+        self.missing = missing        # GAP: how many sequence numbers were skipped
+        self.explained = explained    # GAP: how many of them match messages rejected earlier
 
     @property
     def ok(self):
@@ -148,6 +150,17 @@ class IncomingChain:
         self.sender = sender
         self.expected_seq = 1
         self.head = genesis  # hash of the last record we accepted, or genesis
+        # Nonces of messages from this sender that were REJECTED (failed AES-GCM, signature,
+        # freshness...) since the last accepted one. Such a message was really sent, so the
+        # sender's seq advanced, but it never reached the chain: the next valid message then
+        # skips its number. Counting them lets that gap be reported accurately ("1 missing, it
+        # matches the message rejected earlier") instead of as an unexplained deletion. A set
+        # of nonces, so the same bad message delivered twice (e.g. replayed) counts once.
+        self._rejected_nonces = set()
+
+    def note_rejected(self, nonce):
+        """Record that a message from this sender was rejected before the chain saw it."""
+        self._rejected_nonces.add(nonce)
 
     def check(self, recipient, seq, timestamp, message, prev_hash):
         """Judge one already-decrypted, already-signature-verified record.
@@ -170,15 +183,29 @@ class IncomingChain:
                     f"possible reordering or injection")
             self.head = record_hash(record)
             self.expected_seq = seq + 1
+            self._rejected_nonces.clear()
             return ChainVerdict(OK, seq, seq)
 
         # seq > expected: messages are missing. The message is authentic
         # (signature already verified), so resync to it but report the gap.
         missing = seq - self.expected_seq
-        verdict = ChainVerdict(
-            GAP, self.expected_seq, seq,
-            f"{missing} message(s) missing before #{seq} (expected #{self.expected_seq}): "
-            f"possible deletion by the relay")
+        explained = min(missing, len(self._rejected_nonces))
+        # STRICT: a gap is always reported (status GAP), explained or not. "Explained" only
+        # means the count matches messages this client itself rejected and showed a card for;
+        # the wording says so without claiming the gap is harmless.
+        if explained == 0:
+            detail = (f"{missing} message(s) missing before #{seq} (expected "
+                      f"#{self.expected_seq}): possible deletion by the relay")
+        elif explained == missing:
+            detail = (f"{missing} message(s) missing before #{seq} (expected "
+                      f"#{self.expected_seq}): matches {explained} message(s) rejected earlier, "
+                      f"which were never shown")
+        else:
+            detail = (f"{missing} message(s) missing before #{seq} (expected "
+                      f"#{self.expected_seq}): {explained} match message(s) rejected earlier, "
+                      f"{missing - explained} unaccounted for: possible deletion by the relay")
+        verdict = ChainVerdict(GAP, self.expected_seq, seq, detail, missing, explained)
         self.head = record_hash(record)
         self.expected_seq = seq + 1
+        self._rejected_nonces.clear()      # resynchronised: the next message starts clean
         return verdict

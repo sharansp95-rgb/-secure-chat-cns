@@ -79,7 +79,24 @@ HANDSHAKE_OTHER = {
 }
 
 
-def describe_rejection(kind, reason, detail=None):
+def _gap_explain(data):
+    """Wording for a chain gap, using how many missing messages match earlier rejections."""
+    missing, explained = int(data.get("missing") or 0), int(data.get("explained") or 0)
+    if missing and explained >= missing:
+        noun = "message" if missing == 1 else "messages"
+        return (f"{missing} {noun} missing from the sequence. It matches a message this window "
+                f"already blocked above (it was never shown). The chain continues from here.")
+    if explained:
+        return (f"{missing} messages missing: {explained} match messages blocked earlier, "
+                f"{missing - explained} do not. The relay may have deleted them. The chain "
+                f"continues from here.")
+    noun = "message is" if missing == 1 else f"{missing} messages are"
+    return (f"{noun.capitalize() if missing != 1 else 'A message is'} missing from the sequence "
+            f"and nothing was blocked for it: the relay may have deleted it. The chain "
+            f"continues from here.")
+
+
+def describe_rejection(kind, reason, detail=None, data=None):
     """Describe a `message_rejected` / `chain_warning` / `handshake_aborted` event.
 
     Returns {"title", "explain", "check", "detail", "severity"}: severity is "bad" for
@@ -93,6 +110,10 @@ def describe_rejection(kind, reason, detail=None):
             "title": "rejected", "explain": "A security check rejected this message.",
             "check": "Client-side verification"}
         severity, prefix = ("warn", "Warning") if kind == "chain_warning" else ("bad", "Message blocked")
+    if kind == "chain_warning" and data and data.get("missing"):
+        base = {**base, "explain": _gap_explain(data)}
+        if data.get("explained", 0) >= data["missing"]:
+            base["title"] = "gap matches a blocked message"
     return {**base, "headline": f"{prefix}: {base['title']}", "severity": severity,
             "detail": detail if detail else (reason if kind == "handshake_aborted" else None)}
 
@@ -149,6 +170,9 @@ def banner_for(kind, data=None):
         info = REJECTIONS.get(reason)
         return ("bad", info["explain"]) if info else None
     if kind == "chain_warning":
+        if data.get("missing") and data.get("explained", 0) >= data["missing"]:
+            return ("warn", "A message that was blocked earlier left a gap in the numbering. "
+                            "The hash chain noticed it and carried on from the next message.")
         return BANNER_TEXT["chain_gap"]
     if kind == "handshake_aborted":
         verified = "did not verify" in (data.get("reason") or "").lower()

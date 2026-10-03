@@ -170,3 +170,24 @@ def test_settings_button_is_compact_and_opens_the_menu(app):
     app.settings_menu.tk_popup = lambda x, y: popped.append((x, y))
     app._popup_settings()
     assert popped
+
+
+# ---- gap wording (explained by an earlier rejection vs a real deletion) ------------------
+
+def test_gap_card_and_banner_say_when_the_gap_matches_a_blocked_message():
+    from gui.explain import describe_rejection
+    explained = {"missing": 1, "explained": 1}
+    info = describe_rejection("chain_warning", "chain_gap", "d", explained)
+    assert info["headline"] == "Warning: gap matches a blocked message" and info["severity"] == "warn"
+    assert "matches a message this window already blocked" in info["explain"]
+    assert banner_for("chain_warning", explained)[1].startswith("A message that was blocked earlier")
+
+
+def test_gap_with_nothing_blocked_still_says_possible_deletion():
+    from gui.explain import describe_rejection
+    info = describe_rejection("chain_warning", "chain_gap", "d", {"missing": 1, "explained": 0})
+    assert info["headline"] == "Warning: message missing"
+    assert "nothing was blocked for it" in info["explain"] and "may have deleted" in info["explain"]
+    assert banner_for("chain_warning", {"missing": 1, "explained": 0}) == banner_for("chain_warning", {})
+    many = describe_rejection("chain_warning", "chain_gap", "d", {"missing": 3, "explained": 1})
+    assert "3 messages missing: 1 match" in many["explain"] and "2 do not" in many["explain"]

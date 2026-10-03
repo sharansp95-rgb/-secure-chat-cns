@@ -52,6 +52,7 @@ from crypto_engine.signatures import fingerprint  # noqa: E402
 from crypto_engine.signatures import generate_keypair as generate_rsa_keypair  # noqa: E402
 from crypto_engine.signatures import serialize_public_key  # noqa: E402
 from gui import widgets  # noqa: E402
+from gui.macos import set_app_name  # noqa: E402
 from server.security_log import DEFAULT_LOG_PATH, read_events  # noqa: E402
 from gui.explain import (  # noqa: E402
     LAB_ATTACKS,
@@ -1670,7 +1671,7 @@ class ChatGUI(tk.Tk):
         if kind in ("message_rejected", "chain_warning"):
             # Both come straight from the client's real checks. A rejected message was
             # NOT displayed; a chain warning (gap) accompanies a message that was.
-            info = describe_rejection(kind, data.get("reason"), data.get("detail"))
+            info = describe_rejection(kind, data.get("reason"), data.get("detail"), data)
             self._add_blocked_card(info, sender=data.get("sender"))
             self._append_wire(f"{info['headline']} (from {data.get('sender')}): "
                               f"{data.get('detail')}", "ALERT")
@@ -1738,6 +1739,7 @@ def main():
                         help="security event log the Attack Lab reads results from "
                              "(default: the server's logs/security_events.jsonl)")
     args = parser.parse_args()
+    set_app_name("Secure Chat")      # macOS menu bar says "Secure Chat", not "python"
     app = ChatGUI(log_path=args.log_path)
     app.port_var.set(str(args.port))
     if args.presentation:

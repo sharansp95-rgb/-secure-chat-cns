@@ -162,6 +162,16 @@ def verify_evidence(data, expect_fingerprints=()):
 
     # --- records ------------------------------------------------------------
     r.heading("Messages")
+    # Messages the exporter's own client rejected (tampered, bad signature, stale...): each was
+    # really sent, so it explains a missing sequence number -- but the file still lacks it, so
+    # a gap stays a failure; the annotation just says what the export itself recorded.
+    rejected_total = sum(
+        1 for e in (data.get("rejected_events") or []) if isinstance(e, dict)
+        and e.get("kind") == "message_rejected"
+        and e.get("reason") in ("decryption_failed", "signature_failed", "stale_timestamp",
+                                "malformed", "unknown_peer_key"))
+    gap_note = (f"; this export also records {rejected_total} rejected message(s) that were never "
+                f"shown, which may account for some of the missing ones") if rejected_total else ""
     expected = {n: {"seq": 1, "head": genesis.get(n)} for n in names}
     for index, rec in enumerate(records, start=1):
         label = None
@@ -187,7 +197,7 @@ def verify_evidence(data, expect_fingerprints=()):
                 elif isinstance(seq, int) and seq > state["seq"]:
                     problems.append(("chain", f"GAP: {seq - state['seq']} message(s) from "
                                               f"{sender} missing before seq {seq} "
-                                              f"(expected {state['seq']})"))
+                                              f"(expected {state['seq']}){gap_note}"))
                 elif isinstance(seq, int) and seq < state["seq"]:
                     problems.append(("chain", f"seq {seq} appears after seq "
                                               f"{state['seq'] - 1}: reordered or duplicated"))

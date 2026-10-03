@@ -21,6 +21,7 @@ from tkinter import ttk
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gui import widgets  # noqa: E402
+from gui.macos import set_app_name  # noqa: E402
 from gui.explain import compute_kpis, countdown, describe_log_event, locked_accounts  # noqa: E402
 from gui.theme import Theme  # noqa: E402
 from server.security_log import DEFAULT_LOG_PATH, read_events  # noqa: E402
@@ -403,6 +404,7 @@ def main():
     parser.add_argument("--presentation", action="store_true",
                         help="start in Presentation mode (~25% larger text and padding, for a projector)")
     args = parser.parse_args()
+    set_app_name("Secure Chat")      # macOS menu bar says "Secure Chat", not "python"
     app = SecurityDashboard(log_path=args.log_path)
     if args.presentation:
         app.set_presentation(True)

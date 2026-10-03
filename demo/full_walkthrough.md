@@ -84,7 +84,7 @@ Drag it to a corner of the screen, visible but out of the way of the two chat wi
 you'll open next.
 
 **1.4** Quick sanity check (optional but recommended): run `pytest tests/ -v` once and
-confirm it ends with `325 passed`. This is not shown to the professor; it's your own
+confirm it ends with `337 passed`. This is not shown to the professor; it's your own
 confidence check that nothing is broken before you start.
 
 ---
@@ -182,6 +182,44 @@ character identical** to the fingerprint bob's own window shows for himself as
 > handshake, these two fingerprints wouldn't match, and we'd catch it just by reading
 > them aloud to each other, independent of any code running. This is the exact human
 > backstop our design doc calls 'check key fingerprints.'"
+
+---
+
+## Messages to type (doctor ↔ pharmacist script)
+
+Use these exact lines so the audience sees a realistic hospital exchange. **Window A = Dr. Rao
+(the doctor, e.g. user `drrao`, Peer `pharmacy`); Window B = the pharmacist (user `pharmacy`,
+Peer `drrao`).** Each line is short enough to read on a projector. Type it in the window shown,
+press Enter. (Any two usernames work; `drrao` sorts before `pharmacy`, so window A starts the
+handshake, which is what the MITM step needs.)
+
+**Normal conversation (step 6):**
+
+| # | Type in | Message |
+|---|---|---|
+| 1 | A (doctor) | `Patient 4471: amoxicillin 500 mg, 3 times daily for 7 days.` |
+| 2 | B (pharmacist) | `Received. Checking the allergy record first.` |
+| 3 | B (pharmacist) | `No allergies on file. Dispensing now.` |
+| 4 | A (doctor) | `Thanks. Please log the dispensing time.` |
+| 5 | B (pharmacist) | `Logged at 14:32. Ready at counter 2.` |
+
+**Attacks (step 7). Arm in the doctor's window (A), then type the message shown in A:**
+
+| Attack | Arm (button in A's Attack Lab) | Then type in A | What B shows |
+|---|---|---|---|
+| Tamper | Tamper next message | `Correction: dose is 1000 mg, not 500 mg.` | red "Message blocked: tampered in transit" card |
+| Replay | first send a normal line: `Patient 4471 is also due a blood test.`, wait for it to appear in B, then **Replay last message** | (nothing: the relay resends it) | "Message blocked: replayed message" |
+| Drop | Drop next message | `Cancel the 14:00 delivery.` then immediately `Please confirm the new time.` | amber "Warning: message missing" on the second line, which is still shown |
+| MITM | **Before B logs in:** arm **MITM next handshake** in A, then log in B (restart B's window if it is already logged in; the other order never triggers it) | (nothing) | red "Handshake blocked: signature check failed" and sending disabled |
+
+What to expect from the hash chain: after a **tamper**, the next normal message shows an amber
+"1 message missing ... matches a message blocked earlier" card (the tampered line really was
+sent, so its number is skipped; it is reported once, and later messages are green again). After
+the **drop**, the second line reports "1 message missing ... possible deletion by the relay" and
+messages after it are verified normally. Each attack is reported exactly once.
+
+**After the attacks:** B (pharmacist): `Understood. Confirmed for 15:30.` then click **Export
+Evidence** in either window for the signed record.
 
 ---
 
@@ -550,7 +588,7 @@ To verify a GUI export yourself instead (optional):
 > to end: a real GUI with a security receipt on every message, a real wire log
 > showing exactly what crosses the network, live attacks triggered from inside the
 > app and caught by specific, testable defenses, and a dashboard watching all of it —
-> all backed by 325 automated tests in our repo. Happy to answer questions or run any
+> all backed by 337 automated tests in our repo. Happy to answer questions or run any
 > of this again."
 
 ---

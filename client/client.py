@@ -797,6 +797,15 @@ class SecureChatClient:
             return
         self._encrypt_and_send(text)
 
+    def _note_rejected(self, envelope):
+        """A chat message that was really sent but failed a per-message check consumed one of
+        the sender's sequence numbers; remember it so the next valid message's gap is reported
+        accurately (see crypto_engine/hash_chain.py). Replays are NOT counted: a duplicate is
+        not a new message."""
+        with self._lock:
+            if self._in_chain is not None:
+                self._in_chain.note_rejected(envelope.get("nonce", ""))
+
     def _handle_chat(self, envelope):
         with self._lock:
             key = self.session_key
@@ -820,6 +829,7 @@ class SecureChatClient:
             print(f"\r[!] WARNING: message from {sender} failed "
                   f"authentication (tampered or wrong key) -- discarded.\n> ",
                   end="", flush=True)
+            self._note_rejected(envelope)
             self._emit("message_rejected", sender=sender, reason="decryption_failed",
                        detail="AES-GCM authentication failed (tampered or wrong key)")
             return
@@ -839,6 +849,7 @@ class SecureChatClient:
         except (json.JSONDecodeError, KeyError, ValueError, UnicodeDecodeError):
             print(f"\r[!] WARNING: message from {sender} was malformed after "
                   f"decryption -- discarded.\n> ", end="", flush=True)
+            self._note_rejected(envelope)
             self._emit("message_rejected", sender=sender, reason="malformed",
                        detail="payload was malformed after decryption")
             return
@@ -846,6 +857,7 @@ class SecureChatClient:
         if self.peer_public_key is None:
             print(f"\r[!] WARNING: cannot verify signature from {sender} -- "
                   f"their public key is unknown -- discarded.\n> ", end="", flush=True)
+            self._note_rejected(envelope)
             self._emit("message_rejected", sender=sender, reason="unknown_peer_key",
                        detail="sender's public key is unknown")
             return
@@ -855,6 +867,7 @@ class SecureChatClient:
             print(f"\r[!] WARNING: signature verification FAILED for message "
                   f"from {sender} -- possible tampering or forgery -- "
                   f"discarded.\n> ", end="", flush=True)
+            self._note_rejected(envelope)
             self._emit("message_rejected", sender=sender, reason="signature_failed",
                        detail="RSA signature verification failed (tampering or forgery)")
             return
@@ -868,6 +881,7 @@ class SecureChatClient:
             print(f"\r[!] WARNING: message from {sender} has a stale or "
                   f"future timestamp ({timestamp}) -- rejected as too old / "
                   f"a possible replay -- discarded.\n> ", end="", flush=True)
+            self._note_rejected(envelope)
             self._emit("message_rejected", sender=sender, reason="stale_timestamp",
                        detail=f"timestamp {timestamp} outside the freshness window")
             return
@@ -920,7 +934,8 @@ class SecureChatClient:
         if verdict.status == GAP:
             print(f"\r[!] WARNING: {verdict.detail}.\n> ", end="", flush=True)
             self._emit("chain_warning", sender=sender, reason="chain_gap",
-                       detail=verdict.detail, seq=verdict.got_seq)
+                       detail=verdict.detail, seq=verdict.got_seq,
+                       missing=verdict.missing, explained=verdict.explained)
 
         rec_hash = record_hash(signable)
         receipt = {
