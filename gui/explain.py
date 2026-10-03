@@ -290,3 +290,109 @@ def receipt_details(receipt):
 def shorten(value, n=22):
     value = value or "-"
     return value if len(value) <= n else value[:n] + "…"
+
+
+# --- Security dashboard -------------------------------------------------------------------
+#
+# The dashboard only READS logs/security_events.jsonl. These pure functions turn those
+# records into readable one-liners, KPI numbers and the list of currently locked accounts.
+
+ACTION_NAMES = {
+    "tamper_next": "tampering with a message",
+    "replay_last": "replaying a message",
+    "drop_next": "dropping a message",
+    "mitm_next_handshake": "a man-in-the-middle key swap",
+}
+_ALERT_WORDS = {
+    "chain_warning": "flagged a gap in the hash chain",
+    "handshake_aborted": "refused a tampered key exchange (RSA signature)",
+}
+
+
+def _seconds(value):
+    try:
+        return f"{float(value):.0f} s"
+    except (TypeError, ValueError):
+        return "a while"
+
+
+def describe_log_event(event):
+    """(glyph, severity, one-line text) for a security-log record. severity is one of
+    "info", "ok", "warn", "bad". Unknown event types still get a sensible line."""
+    kind = event.get("event", "?")
+    user = event.get("username")
+    addr = event.get("from_addr")
+    if kind == "user_registered":
+        return "✚", "info", f"{user} registered a new account"
+    if kind == "user_login":
+        return "➜", "ok", f"{user} logged in"
+    if kind == "failed_login":
+        return "✕", "warn", f"Failed login for {user} (from {addr})"
+    if kind == "account_locked":
+        return "■", "bad", (f"{user} locked out for {_seconds(event.get('retry_after'))} after "
+                            f"repeated failed logins (lockout #{int(event.get('lock_level', 0)) + 1})")
+    if kind == "lockout_rejected":
+        return "⊘", "warn", (f"Login attempt on locked account {user} refused "
+                             f"({_seconds(event.get('retry_after'))} left)")
+    if kind == "address_rate_limited":
+        return "⚑", "warn", (f"{addr} slowed down: too many connection attempts "
+                             f"({event.get('attempted_type')})")
+    if kind == "non_tls_connection":
+        return "!", "warn", f"Connection from {addr} refused: not a TLS client"
+    if kind == "malformed_envelope":
+        return "!", "warn", f"Malformed message from {event.get('from_user') or addr} ignored"
+    if kind == "lab_control_rejected":
+        return "⚠", "warn", (f"Attack Lab request from {event.get('requested_by')} refused "
+                             f"({event.get('reason')})")
+    if kind == "lab_attack_performed":
+        what = ACTION_NAMES.get(event.get("action"), event.get("action"))
+        return "✂", "warn", (f"Relay attack performed: {what} on {event.get('target')}'s traffic "
+                             f"(armed by {event.get('armed_by')})")
+    if kind == "security_alert":
+        who, peer = event.get("reported_by"), event.get("peer")
+        alert, reason = event.get("alert"), event.get("reason")
+        if alert == "message_rejected" and reason in REJECTIONS:
+            r = REJECTIONS[reason]
+            return "◆", "bad", (f"{who}'s client blocked a message from {peer}: {r['title']} "
+                                f"(caught by {r['check']})")
+        return "◆", "bad", f"{who}'s client {_ALERT_WORDS.get(alert, 'reported: ' + str(alert))}" \
+                           f" (peer {peer})"
+    details = ", ".join(f"{k}={v}" for k, v in event.items() if k not in ("ts", "event"))
+    return "•", "info", f"{kind}: {details}" if details else kind
+
+
+def compute_kpis(events):
+    """The dashboard's top tiles, from the log records only."""
+    users = {e.get("username") for e in events
+             if e.get("event") in ("user_login", "user_registered") and e.get("username")}
+    return {
+        "attacks_detected": sum(1 for e in events if e.get("event") == "security_alert"),
+        "failed_logins": sum(1 for e in events if e.get("event") == "failed_login"),
+        "active_users": len(users),
+    }
+
+
+def lock_records(events):
+    """{username: {"locked_until", "lock_level"}} by replaying the log: a lock lasts until its
+    recorded retry_after; a later successful login (user_login) clears it early."""
+    locks = {}
+    for event in events:
+        if event.get("event") == "account_locked":
+            locks[event.get("username")] = {
+                "locked_until": float(event.get("ts", 0)) + float(event.get("retry_after", 0)),
+                "lock_level": event.get("lock_level", 0)}
+        elif event.get("event") == "user_login":
+            locks.pop(event.get("username"), None)
+    return locks
+
+
+def locked_accounts(events, now):
+    """Accounts still locked at `now`: {username: {"locked_until", "lock_level", "remaining"}}."""
+    return {u: {**d, "remaining": max(0.0, d["locked_until"] - now)}
+            for u, d in lock_records(events).items() if d["locked_until"] > now}
+
+
+def countdown(seconds):
+    """0:42 style countdown text."""
+    seconds = max(0, int(seconds))
+    return f"{seconds // 60}:{seconds % 60:02d}"

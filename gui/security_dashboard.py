@@ -1,15 +1,12 @@
-"""Security dashboard (Stage D): a read-only window onto
-logs/security_events.jsonl.
+"""Security dashboard (Stage D): a read-only window onto logs/security_events.jsonl.
 
-Deliberately NOT a client of the chat protocol -- it never opens a socket,
-never connects to the relay server, and has no SecureChatClient. It only
-tails one local file and renders what's in it: live counters per event
-type, a colour-coded scrolling event feed, and the accounts currently
-locked out (with their remaining lock time, computed from the
-"account_locked" events' own retry_after). This mirrors how a real SOC
-dashboard works -- reading a log, not instrumenting the thing being
-watched -- and keeps it trivially safe to leave open during a demo: it
-cannot affect the server or either chat session no matter what it does.
+Deliberately NOT a client of the chat protocol -- it never opens a socket, never connects
+to the relay server, and has no SecureChatClient. It only tails one local file and renders
+what is in it: four KPI tiles, a colour-coded live event feed with a readable one-line
+description per event (click one for its raw details), and the accounts currently locked
+out with a live countdown. This mirrors how a real SOC dashboard works -- reading a log,
+not instrumenting the thing being watched -- and keeps it trivially safe to leave open
+during a demo: it cannot affect the server or either chat session no matter what it does.
 
 Run:  python gui/security_dashboard.py [--log-path logs/security_events.jsonl]
 """
@@ -17,26 +14,30 @@ Run:  python gui/security_dashboard.py [--log-path logs/security_events.jsonl]
 import argparse
 import os
 import sys
+import time
 import tkinter as tk
-from collections import Counter
 from tkinter import ttk
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from gui import widgets  # noqa: E402
+from gui.explain import compute_kpis, countdown, describe_log_event, locked_accounts  # noqa: E402
 from gui.theme import Theme  # noqa: E402
 from server.security_log import DEFAULT_LOG_PATH, read_events  # noqa: E402
 
-POLL_INTERVAL_MS = 500
+POLL_INTERVAL_MS = 500       # how often the log is re-read (only when it changed)
+TICK_INTERVAL_MS = 1000      # countdown refresh
+FLASH_MS = 1400              # how long a KPI tile stays highlighted after it changes
 FEED_MAX_LINES = 500
+COMPACT_BELOW_HEIGHT = 520   # windows shorter than this drop the subtitle and tile captions
 
-# Colour coding, by event severity -- "warning" tags the kind that are
-# always a live defense working (an attack or abuse attempt actually
-# caught), vs. plain "info" for routine activity.
-_WARNING_EVENTS = {
-    "failed_login", "account_locked", "lockout_rejected", "address_rate_limited",
-    "non_tls_connection", "malformed_envelope", "lab_control_rejected",
-    "lab_attack_performed", "security_alert",
-}
+KPI_TILES = [
+    # key, label, caption, colour once non-zero
+    ("attacks_detected", "Attacks detected", "caught by client checks", "danger"),
+    ("failed_logins", "Failed logins", "wrong passwords", "warning"),
+    ("locked_accounts", "Locked accounts", "right now", "danger"),
+    ("active_users", "Active users", "seen in this log", "success"),
+]
 
 
 class SecurityDashboard(tk.Tk):
@@ -45,195 +46,271 @@ class SecurityDashboard(tk.Tk):
         self.log_path = log_path
         self.title("Security Dashboard")
         self.geometry("920x620")
-        self.minsize(640, 320)
+        self.minsize(640, 400)
 
         self.theme = Theme(self)
         self.configure(background=self.theme.bg_app)
         style = ttk.Style(self)
         self.theme.apply_ttk(style)
 
-        self._seen_count = 0           # how many lines of the log we've already rendered
-        self._counts = Counter()       # event type -> running total
-        self._counter_labels = {}      # event type -> tk.Label (created lazily, as seen)
-        self._locked = {}              # username -> {"locked_until", "remaining", "lock_level"}
+        self._events = []            # every record read so far
+        self._seen_count = 0         # how many of them are already in the feed
+        self._signature = None       # (size, mtime) of the log when last read
+        self._row_events = {}        # feed row number -> raw record
+        self._selected_row = None
+        self._kpi_values = {}
+        self._captions = []          # (caption label, number label) per KPI tile
+        self._compact = False        # short window: drop the subtitle and tile captions
+        self._locked = {}            # username -> {"locked_until", "lock_level", "remaining"}
 
         self._build_layout()
-        # ttk.Panedwindow takes its initial split from requested widths, which
-        # left the Locked accounts pane too narrow for its own title and text.
-        # (Realize the window first: before it is mapped the pane is ~1px wide
-        # and Tk clamps the sash to that.)
+        # ttk.Panedwindow takes its initial split from requested widths, which left the
+        # Locked accounts pane too narrow for its own title and text. (Realize the window
+        # first: before it is mapped the pane is ~1px wide and Tk clamps the sash to that.)
         self.update()
-        self.paned.sashpos(0, max(240, int(self.paned.winfo_width() * 0.3)))
+        self.paned.sashpos(0, max(240, int(self.paned.winfo_width() * 0.28)))
+        self.bind("<Configure>", self._on_configure)
+        self._apply_density()
         self._poll()
+        self._tick()
 
-    # --- layout -----------------------------------------------------------
+    # --- layout -----------------------------------------------------------------------
 
     def _build_layout(self):
         t = self.theme
-        top = tk.Frame(self, background=t.bg_lab, padx=16, pady=10)
-        top.pack(side="top", fill="x")
-        # Title and watched-path are stacked (not side by side): next to each
-        # other they did not fit at the narrower widths the demo launcher uses.
-        tk.Label(top, text="SECURITY DASHBOARD -- read-only, not connected to the server",
-                 background=t.bg_lab, foreground="#ffffff",
-                 font=(t.ui_font, t.size(11), "bold")).pack(side="top", anchor="w")
-        # Show the log path relative to the project when it lives inside it: the
-        # absolute path is long enough to be clipped next to the title.
+        header = tk.Frame(self, background=t.bg_panel, padx=t.sp("lg"), pady=t.sp("md"))
+        header.pack(side="top", fill="x")
+        self.header_frame = header
+        top = tk.Frame(header, background=t.bg_panel)
+        top.pack(fill="x")
+        tk.Label(top, text="Security Dashboard", background=t.bg_panel, foreground=t.fg_primary,
+                 font=t.font("title")).pack(side="left")
+        widgets.Chip(top, t, "READ-ONLY", "warn").pack(side="left", padx=(t.sp("md"), 0))
+        self._header_top = top
+        self._subtitle = tk.Label(header, text="Not connected to the server: it only reads the "
+                                               "security log.", background=t.bg_panel,
+                                  foreground=t.fg_secondary, font=t.font("caption"))
+        self._subtitle.pack(anchor="w")
+        # Show the log path relative to the project when it lives inside it: the absolute
+        # path is long enough to be clipped.
         shown = os.path.relpath(self.log_path, os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))))
         if shown.startswith(".."):
             shown = self.log_path
         self.path_var = tk.StringVar(value=f"watching: {shown}")
-        tk.Label(top, textvariable=self.path_var, background=t.bg_lab, foreground="#ffe8c8",
-                 font=(t.mono_font, t.size(8))).pack(side="top", anchor="w")
+        tk.Label(header, textvariable=self.path_var, background=t.bg_panel,
+                 foreground=t.fg_hint, font=t.font("mono_small"), anchor="w").pack(anchor="w")
 
-        body = tk.Frame(self, background=t.bg_app, padx=12, pady=10)
+        body = tk.Frame(self, background=t.bg_app, padx=t.sp("md"), pady=t.sp("md"))
         body.pack(fill="both", expand=True)
 
-        # -- counters row --
-        self.counters_frame = tk.Frame(body, background=t.bg_panel, padx=12, pady=10)
-        self.counters_frame.pack(side="top", fill="x", pady=(0, 10))
-        tk.Label(self.counters_frame, text="Event counts", background=t.bg_panel,
-                 foreground=t.fg_secondary, font=(t.ui_font, t.size(9), "bold")).grid(
-            row=0, column=0, sticky="w", padx=(0, 16))
-        self._counters_row = 0
-        self._counters_col = 1
+        # -- KPI tiles --
+        self.kpi_row = tk.Frame(body, background=t.bg_app)
+        self.kpi_row.pack(side="top", fill="x", pady=(0, t.sp("md")))
+        self._tiles = {}
+        for column, (key, label, caption, _color) in enumerate(KPI_TILES):
+            self.kpi_row.columnconfigure(column, weight=1, uniform="kpi")
+            tile = tk.Frame(self.kpi_row, background=t.bg_panel, highlightthickness=2,
+                            highlightbackground=t.bg_panel, highlightcolor=t.bg_panel)
+            tile.grid(row=0, column=column, sticky="nsew",
+                      padx=(0 if column == 0 else t.sp("sm"), 0))
+            tk.Label(tile, text=label, background=t.bg_panel, foreground=t.fg_secondary,
+                     font=t.font("body_bold"), anchor="w").pack(
+                anchor="w", padx=t.sp("md"), pady=(t.sp("sm"), 0))
+            number = tk.Label(tile, text="0", background=t.bg_panel, foreground=t.fg_primary,
+                              font=t.font("display"), anchor="w")
+            number.pack(anchor="w", padx=t.sp("md"))
+            caption_label = tk.Label(tile, text=caption, background=t.bg_panel,
+                                     foreground=t.fg_hint, font=t.font("caption"), anchor="w",
+                                     wraplength=t.sp(130))
+            caption_label.pack(anchor="w", padx=t.sp("md"), pady=(0, t.sp("sm")))
+            self._tiles[key] = (tile, number)
+            self._captions.append((caption_label, number))
 
         # -- split pane: locked accounts (left) / live feed (right) --
         paned = ttk.Panedwindow(body, orient="horizontal")
         paned.pack(fill="both", expand=True)
 
         locked_pane = tk.Frame(paned, background=t.bg_panel)
-        ttk.Label(locked_pane, text="Locked accounts", style="SectionTitle.TLabel",
-                 background=t.bg_panel, padding=(10, 8, 10, 4)).pack(anchor="w")
+        tk.Label(locked_pane, text="Locked accounts", background=t.bg_panel,
+                 foreground=t.fg_secondary, font=t.font("body_bold")).pack(
+            anchor="w", padx=t.sp("md"), pady=(t.sp("sm"), t.sp("xs")))
         self.locked_list = tk.Frame(locked_pane, background=t.bg_panel)
-        self.locked_list.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self.locked_empty_label = tk.Label(self.locked_list, text="No accounts currently locked.",
-                                           background=t.bg_panel, foreground=t.fg_secondary,
-                                           font=(t.ui_font, t.size(9)), wraplength=200,
-                                           justify="left")
+        self.locked_list.pack(fill="both", expand=True, padx=t.sp("md"), pady=(0, t.sp("md")))
+        self.locked_empty_label = tk.Label(
+            self.locked_list, text="No accounts currently locked.", background=t.bg_panel,
+            foreground=t.fg_secondary, font=t.font("body"), wraplength=t.sp(200), justify="left")
         self.locked_empty_label.pack(anchor="w")
         paned.add(locked_pane, weight=0)  # fixed width; only the feed stretches
         self.paned = paned
 
         feed_pane = tk.Frame(paned, background=t.bg_panel_alt)
-        ttk.Label(feed_pane, text="Live event feed", style="SectionTitle.TLabel",
-                 background=t.bg_panel_alt, padding=(10, 8, 10, 4)).pack(anchor="w")
+        tk.Label(feed_pane, text="Live event feed", background=t.bg_panel_alt,
+                 foreground=t.fg_secondary, font=t.font("body_bold")).pack(
+            anchor="w", padx=t.sp("md"), pady=(t.sp("sm"), 0))
+        tk.Label(feed_pane, text="click an event for its raw details", background=t.bg_panel_alt,
+                 foreground=t.fg_hint, font=t.font("caption")).pack(
+            anchor="w", padx=t.sp("md"), pady=(0, t.sp("xs")))
+        self.detail_var = tk.StringVar(value="")
+        self.detail_label = tk.Label(feed_pane, textvariable=self.detail_var,
+                                     background=t.bg_raised, foreground=t.fg_primary,
+                                     font=t.font("mono_small"), anchor="w", justify="left",
+                                     wraplength=t.sp(480), padx=t.sp("md"), pady=t.sp("sm"))
+        self.detail_label.bind("<Configure>", lambda e: self.detail_label.config(
+            wraplength=max(e.width - 2 * t.sp("md"), 120)))
         feed_body = tk.Frame(feed_pane, background=t.bg_panel_alt)
-        feed_body.pack(fill="both", expand=True, padx=(10, 0), pady=(0, 10))
-        self.feed_text = tk.Text(feed_body, wrap="word", state="disabled",
-                                  font=(t.mono_font, t.size(9)), background=t.bg_panel_alt,
-                                  foreground=t.wire_info, borderwidth=0, highlightthickness=0,
-                                  padx=8, pady=6)
+        self._feed_body = feed_body
+        # the details bar appears (packed below the feed) the first time an event is clicked
+        feed_body.pack(fill="both", expand=True, padx=(t.sp("md"), 0), pady=(0, t.sp("xs")))
+        self.feed_text = tk.Text(feed_body, wrap="word", state="disabled", cursor="arrow",
+                                 font=t.font("body"), background=t.bg_panel_alt,
+                                 foreground=t.fg_primary, borderwidth=0, highlightthickness=0,
+                                 padx=t.sp("sm"), pady=t.sp("sm"), spacing1=3, spacing3=3)
         feed_scroll = ttk.Scrollbar(feed_body, orient="vertical", command=self.feed_text.yview)
         self.feed_text.configure(yscrollcommand=feed_scroll.set)
         self.feed_text.pack(side="left", fill="both", expand=True)
         feed_scroll.pack(side="right", fill="y")
-        self.feed_text.tag_config("warning", foreground=t.wire_warning,
-                                  font=(t.mono_font, t.size(9), "bold"))
-        self.feed_text.tag_config("info", foreground=t.wire_info)
+        self.feed_text.tag_config("ts", foreground=t.fg_hint, font=t.font("mono_small"))
+        for sev, color in (("info", t.fg_secondary), ("ok", t.success), ("warn", t.warning),
+                           ("bad", t.danger)):
+            self.feed_text.tag_config(f"icon_{sev}", foreground=color, font=t.font("body_bold"))
+            self.feed_text.tag_config(f"text_{sev}", foreground=t.fg_primary if sev == "info"
+                                      else color)
+        self.feed_text.tag_config("selected", background=t.bg_raised)
+        self.feed_text.tag_raise("selected")
         paned.add(feed_pane, weight=1)
 
-    # --- polling: read whatever is new in the log, render it -------------
+    # --- density: a short window (e.g. the launcher's bottom strip) gives the feed the room ---
+
+    def _on_configure(self, event):
+        if event.widget is self:
+            self._apply_density()
+
+    def _apply_density(self):
+        compact = self.winfo_height() < COMPACT_BELOW_HEIGHT
+        if compact == self._compact and self._subtitle.winfo_manager() != (
+                "" if compact else None):
+            return
+        self._compact = compact
+        if compact:
+            self._subtitle.pack_forget()
+            for caption, _number in self._captions:
+                caption.pack_forget()
+        else:
+            self._subtitle.pack(anchor="w", after=self._header_top)
+            for caption, number in self._captions:
+                caption.pack(anchor="w", padx=self.theme.sp("md"), pady=(0, self.theme.sp("sm")),
+                             after=number)
+
+    # --- polling: read whatever is new in the log, render it ----------------------------
 
     def _poll(self):
-        events = read_events(self.log_path)
-        new = events[self._seen_count:]
-        if new:
-            self._seen_count = len(events)
-            for event in new:
-                self._counts[event["event"]] += 1
+        try:
+            stat = os.stat(self.log_path)
+            signature = (stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            signature = None
+        if signature != self._signature:        # only re-read when the file changed
+            self._signature = signature
+            self._events = read_events(self.log_path)
+            for event in self._events[self._seen_count:]:
                 self._append_feed(event)
-            self._refresh_counters()
-        self._recompute_locked(events)
+            self._seen_count = len(self._events)
+            self._refresh_kpis()
         self.after(POLL_INTERVAL_MS, self._poll)
 
+    def _tick(self):
+        """Once a second: recompute who is still locked and redraw the countdowns."""
+        self._locked = locked_accounts(self._events, time.time())
+        self._render_locked()
+        self._set_kpi("locked_accounts", len(self._locked))
+        self.after(TICK_INTERVAL_MS, self._tick)
+
+    # --- feed ---------------------------------------------------------------------------
+
     def _append_feed(self, event):
-        import time as _time
-        t = self.theme
-        ts = _time.strftime("%H:%M:%S", _time.localtime(event.get("ts", 0)))
-        etype = event.get("event", "?")
-        detail_parts = [f"{k}={v}" for k, v in event.items() if k not in ("ts", "event")]
-        line = f"[{ts}] {etype}: {', '.join(detail_parts)}\n"
-        tag = "warning" if etype in _WARNING_EVENTS else "info"
-
-        self.feed_text.config(state="normal")
-        self.feed_text.insert("end", line, (tag,))
-        # Cap the feed so a long-running demo doesn't grow Tk's Text widget
-        # unboundedly -- the full history is still in the log file itself.
-        line_count = int(self.feed_text.index("end-1c").split(".")[0])
+        glyph, severity, text = describe_log_event(event)
+        stamp = time.strftime("%H:%M:%S", time.localtime(event.get("ts", 0)))
+        row = len(self._row_events) + 1
+        self._row_events[row] = event
+        tag = f"row{row}"
+        w = self.feed_text
+        w.config(state="normal")
+        w.insert("end", f"{stamp}  ", ("ts", tag))
+        w.insert("end", f"{glyph}  ", (f"icon_{severity}", tag))
+        w.insert("end", f"{text}\n", (f"text_{severity}", tag))
+        w.tag_bind(tag, "<Button-1>", lambda _e, r=row: self._show_details(r))
+        # Cap the feed so a long-running demo doesn't grow the Text widget unboundedly --
+        # the full history is still in the log file itself.
+        line_count = int(w.index("end-1c").split(".")[0])
         if line_count > FEED_MAX_LINES:
-            self.feed_text.delete("1.0", f"{line_count - FEED_MAX_LINES}.0")
-        self.feed_text.see("end")
-        self.feed_text.config(state="disabled")
+            w.delete("1.0", f"{line_count - FEED_MAX_LINES}.0")
+        w.see("end")
+        w.config(state="disabled")
 
-    def _refresh_counters(self):
+    def _show_details(self, row):
+        event = self._row_events.get(row)
+        if event is None:
+            return
+        if not self.detail_label.winfo_manager():
+            self.detail_label.pack(side="bottom", fill="x", before=self._feed_body)
+        w = self.feed_text
+        if self._selected_row is not None:
+            w.tag_remove("selected", "1.0", "end")
+        self._selected_row = row
+        start = w.tag_ranges(f"row{row}")
+        if start:
+            w.tag_add("selected", start[0], start[-1])
+        details = "   ".join(f"{k}={v}" for k, v in event.items() if k != "ts")
+        self.detail_var.set(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(event.get('ts', 0)))}"
+                            f"   {details}")
+
+    # --- KPI tiles ---------------------------------------------------------------------
+
+    def _refresh_kpis(self):
+        for key, value in compute_kpis(self._events).items():
+            self._set_kpi(key, value)
+
+    def _set_kpi(self, key, value):
         t = self.theme
-        for etype, count in sorted(self._counts.items()):
-            label = self._counter_labels.get(etype)
-            if label is None:
-                color = t.fg_warning if etype in _WARNING_EVENTS else t.fg_accent
-                cell = tk.Frame(self.counters_frame, background=t.bg_panel)
-                cell.grid(row=self._counters_row, column=self._counters_col,
-                         sticky="w", padx=(0, 18), pady=2)
-                tk.Label(cell, text=f"{etype}:", background=t.bg_panel,
-                         foreground=t.fg_secondary, font=(t.mono_font, t.size(9))).pack(
-                    side="left")
-                label = tk.Label(cell, text="", background=t.bg_panel, foreground=color,
-                                 font=(t.mono_font, t.size(9), "bold"))
-                label.pack(side="left", padx=(4, 0))
-                self._counter_labels[etype] = label
-                self._counters_col += 1
-                if self._counters_col > 3:
-                    self._counters_col = 1
-                    self._counters_row += 1
-            label.config(text=str(count))
+        tile, number = self._tiles[key]
+        color_name = next(c for k, _l, _c, c in KPI_TILES if k == key)
+        number.config(text=str(value),
+                      foreground=getattr(t, color_name) if value else t.fg_primary)
+        previous = self._kpi_values.get(key)
+        self._kpi_values[key] = value
+        if previous is not None and previous != value:       # flash so the change is noticed
+            tile.config(highlightbackground=getattr(t, color_name))
+            self.after(FLASH_MS, lambda: tile.winfo_exists() and tile.config(
+                highlightbackground=t.bg_panel))
 
-    def _recompute_locked(self, events):
-        """Derive the current lock state purely by replaying events (no
-        connection to the server's live LockoutGuard -- this window only
-        ever reads the log) -- a lock from "account_locked" lasts until its
-        recorded retry_after, and a later "user_login" for the same
-        username (a successful login, which is the only event server.py
-        logs AFTER a real success) clears it early."""
-        import time as _time
-        locks = {}
-        for event in events:
-            if event["event"] == "account_locked":
-                username = event.get("username")
-                locked_until = event.get("ts", 0) + float(event.get("retry_after", 0))
-                locks[username] = {"locked_until": locked_until,
-                                   "lock_level": event.get("lock_level", 0)}
-            elif event["event"] == "user_login":
-                locks.pop(event.get("username"), None)
+    # --- locked accounts ---------------------------------------------------------------
 
-        now = _time.time()
-        self._locked = {u: d for u, d in locks.items() if d["locked_until"] > now}
-        self._render_locked(now)  # always redraw: remaining-time labels tick every poll
-
-    def _render_locked(self, now):
+    def _render_locked(self):
         t = self.theme
         for child in self.locked_list.winfo_children():
             child.destroy()
         if not self._locked:
             self.locked_empty_label = tk.Label(
-                self.locked_list, text="No accounts currently locked.",
-                background=t.bg_panel, foreground=t.fg_secondary, font=(t.ui_font, t.size(9)),
-                wraplength=200, justify="left")
+                self.locked_list, text="No accounts currently locked.", background=t.bg_panel,
+                foreground=t.fg_secondary, font=t.font("body"), wraplength=t.sp(200),
+                justify="left")
             self.locked_empty_label.pack(anchor="w")
             return
-        for username, info in sorted(self._locked.items(),
-                                     key=lambda kv: -kv[1]["locked_until"]):
-            remaining = max(0, int(info["locked_until"] - now))
-            row = tk.Frame(self.locked_list, background=t.bg_panel)
-            row.pack(fill="x", pady=4)
-            tk.Label(row, text=username, background=t.bg_panel, foreground=t.fg_primary,
-                     font=(t.ui_font, t.size(10), "bold")).pack(anchor="w")
-            # wraplength: this pane is narrow, and an unwrapped line was clipped
-            # at its right edge ("retry in 56s (lock...").
-            tk.Label(row, text=f"locked -- retry in {remaining}s (lockout #{info['lock_level'] + 1})",
-                     background=t.bg_panel, foreground=t.fg_warning,
-                     font=(t.mono_font, t.size(9)), wraplength=200, justify="left").pack(anchor="w")
+        for username, info in sorted(self._locked.items(), key=lambda kv: -kv[1]["locked_until"]):
+            row = tk.Frame(self.locked_list, background=t.bg_danger_soft, padx=t.sp("md"),
+                           pady=t.sp("sm"))
+            row.pack(fill="x", pady=t.sp("xs"))
+            tk.Label(row, text=username, background=t.bg_danger_soft, foreground=t.fg_primary,
+                     font=t.font("body_bold")).pack(anchor="w")
+            tk.Label(row, text=countdown(info["remaining"]), background=t.bg_danger_soft,
+                     foreground=t.danger, font=t.font("display")).pack(anchor="w")
+            # wraplength: this pane is narrow, and an unwrapped line was clipped at its
+            # right edge ("retry in 56s (lock...").
+            tk.Label(row, text=f"locked, retry in {int(info['remaining'])}s "
+                               f"(lockout #{int(info['lock_level']) + 1})",
+                     background=t.bg_danger_soft, foreground=t.fg_secondary,
+                     font=t.font("caption"), wraplength=t.sp(200), justify="left").pack(anchor="w")
 
 
 def main():
