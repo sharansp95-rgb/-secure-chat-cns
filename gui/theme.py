@@ -25,6 +25,30 @@ can enlarge every label in a window in place, by reconfiguring the fonts.
 import sys
 import tkinter.font as tkfont
 
+_IS_MAC = sys.platform == "darwin"
+
+
+def hand_cursor():
+    """Return the correct 'pointing hand' cursor name for the current platform.
+
+    macOS Tk supports ``pointinghand``; Windows and Linux Tk use ``hand2``.
+    Using the wrong one raises ``_tkinter.TclError: bad cursor spec``.
+    """
+    return "pointinghand" if _IS_MAC else "hand2"
+
+
+def is_no_display_error(exc):
+    """True only when a TclError means 'no display server at all'.
+
+    GUI tests should skip when Tk can't open a display (headless CI, no X11),
+    but must NOT swallow other TclErrors (bad cursor, missing font, etc.) --
+    those are real bugs.
+    """
+    msg = str(exc).lower()
+    return ("no display name" in msg
+            or "couldn't connect to display" in msg
+            or "couldn't connect display" in msg)
+
 # Font fallback: "Poppins" is nice but NOT installed by default on Windows/macOS/most
 # Linux, and hardcoding it would silently fall back to Tk's ugly default. _pick_font()
 # walks this list (only queryable once a Tk root exists) and takes the first family

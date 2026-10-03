@@ -55,7 +55,9 @@ def app():
     try:
         window = chat_gui.ChatGUI()
     except tk.TclError as exc:
-        pytest.skip(f"no display available for Tk: {exc}")
+        if is_no_display_error(exc):
+            pytest.skip(f"no display available for Tk: {exc}")
+        raise
     window.geometry("1040x660+10000+10000")
     window.update()
     window.username, window.peer = "alice", "bob"

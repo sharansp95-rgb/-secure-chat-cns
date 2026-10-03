@@ -31,6 +31,7 @@ import functools
 import os
 import socket
 import sys
+import tempfile
 import threading
 import time
 
@@ -48,6 +49,53 @@ from server.lockout import LockoutGuard  # noqa: E402
 
 HOST = "127.0.0.1"
 AUTH_TIMEOUT = 20  # seconds; see module docstring
+
+
+# ---------------------------------------------------------------------------
+# Session-scoped TLS certificates -- generated ONCE, used by every test.
+# Tests must never read or write the real certs/ directory.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True, scope="session")
+def _test_certs():
+    """Generate a throwaway cert+key into a temp dir and point every module's
+    default cert/key path at it for the entire test session.
+
+    This makes `pytest` work on a fresh clone (where certs/ contains no .crt
+    or .key) without requiring the developer to run generate_certs.py first.
+    """
+    import certs.generate_certs as gen_mod
+
+    tmpdir = tempfile.mkdtemp(prefix="cns_test_certs_")
+    key_path = os.path.join(tmpdir, "server.key")
+    cert_path = os.path.join(tmpdir, "server.crt")
+
+    orig_key, orig_cert = gen_mod.KEY_PATH, gen_mod.CERT_PATH
+    gen_mod.KEY_PATH, gen_mod.CERT_PATH = key_path, cert_path
+    try:
+        gen_mod.generate(force=True)
+    finally:
+        gen_mod.KEY_PATH, gen_mod.CERT_PATH = orig_key, orig_cert
+
+    # Patch the default paths every module uses so the server and client
+    # both find our throwaway cert automatically.
+    _patches = {
+        server_module: [("DEFAULT_CERT_PATH", cert_path), ("DEFAULT_KEY_PATH", key_path)],
+        client_module: [("DEFAULT_CAFILE", cert_path)],
+    }
+    originals = {}
+    for mod, attrs in _patches.items():
+        for attr, value in attrs:
+            originals[(mod, attr)] = getattr(mod, attr)
+            setattr(mod, attr, value)
+
+    yield cert_path, key_path
+
+    for (mod, attr), value in originals.items():
+        setattr(mod, attr, value)
+
+    import shutil
+    shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

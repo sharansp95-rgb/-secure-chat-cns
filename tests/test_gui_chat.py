@@ -10,6 +10,7 @@ import time
 import pytest
 
 import gui.chat_gui as chat_gui
+from gui.theme import is_no_display_error
 
 AUTH = {"username": "alice", "peer": "bob", "lab_mode": True,
         "own_fingerprint": "AAAA BBBB CCCC DDDD", "peer_key_found": True}
@@ -20,7 +21,9 @@ def app():
     try:
         window = chat_gui.ChatGUI()
     except tk.TclError as exc:
-        pytest.skip(f"no display available for Tk: {exc}")
+        if is_no_display_error(exc):
+            pytest.skip(f"no display available for Tk: {exc}")
+        raise
     window.geometry("1040x660+10000+10000")
     window.update()
     window.username, window.peer = "alice", "bob"
@@ -90,7 +93,8 @@ def test_enter_sends_and_shift_enter_inserts_a_newline(app):
     sent = []
     app._on_send = lambda: sent.append(app.message_entry.get_text())
     app.message_entry.bind("<<Send>>", lambda _e: app._on_send())
-    app.message_entry.focus_force()
+    app.message_entry.focus_set()
+    app.update()
     app.message_entry.set_text("first line")
     app.message_entry.event_generate("<Shift-Return>")
     app.message_entry.insert("end", "second line")
@@ -107,7 +111,8 @@ def test_placeholder_is_shown_when_empty_and_ignored_by_get_text(app):
     establish(app)
     app.message_entry.set_text("")
     assert "Enter sends" in app.message_entry.get("1.0", "end")
-    app.message_entry.focus_force()
+    app.message_entry.focus_set()
+    app.update()
     app.message_entry.event_generate("<KeyPress>", keysym="h")   # the first keystroke clears it
     app.update()
     assert app.message_entry.get_text() == "h"
@@ -204,7 +209,9 @@ def test_network_view_default_depends_on_window_width(size, visible):
     try:
         window = chat_gui.ChatGUI()
     except tk.TclError as exc:
-        pytest.skip(f"no display available for Tk: {exc}")
+        if is_no_display_error(exc):
+            pytest.skip(f"no display available for Tk: {exc}")
+        raise
     try:
         window.geometry(f"{size}+10000+10000")
         window.update()
@@ -247,7 +254,9 @@ def test_network_legend_and_title_fit_the_launcher_width():
     try:
         window = chat_gui.ChatGUI()
     except tk.TclError as exc:
-        pytest.skip(f"no display available for Tk: {exc}")
+        if is_no_display_error(exc):
+            pytest.skip(f"no display available for Tk: {exc}")
+        raise
     try:
         window.geometry("723x576+10000+10000")
         window.update()

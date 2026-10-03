@@ -186,8 +186,30 @@ def run_functional(tmp):
         [sys.executable, "-m", "pytest", "tests", "-q", "-p", "no:cacheprovider",
          "--junitxml", junit], cwd=ROOT, capture_output=True, text=True)
     duration = time.time() - started
+
+    # If pytest crashed (segfault, import error, etc.) it may never have
+    # written junit.xml.  Report what we can and let the other sections run.
+    if not os.path.exists(junit):
+        tail = (proc.stdout or "")[-2000:] + "\n" + (proc.stderr or "")[-2000:]
+        say(f"  ⚠  test run crashed (exit code {proc.returncode}); "
+            f"junit.xml was never written.")
+        say(f"  last output:\n{tail.strip()}\n")
+        return {"rows": [], "total": {"passed": 0, "failed": 0, "skipped": 0},
+                "duration_s": round(duration, 1),
+                "pytest_exit_code": proc.returncode,
+                "crashed": True}
+
+    try:
+        tree = ET.parse(junit)
+    except ET.ParseError:
+        say(f"  ⚠  junit.xml is corrupt (exit code {proc.returncode})")
+        return {"rows": [], "total": {"passed": 0, "failed": 0, "skipped": 0},
+                "duration_s": round(duration, 1),
+                "pytest_exit_code": proc.returncode,
+                "crashed": True}
+
     counts = {}
-    for case in ET.parse(junit).getroot().iter("testcase"):
+    for case in tree.getroot().iter("testcase"):
         module = case.get("classname", "").split(".")[1] if "." in case.get("classname", "") else ""
         entry = counts.setdefault(module, {"passed": 0, "failed": 0, "skipped": 0})
         if case.find("failure") is not None or case.find("error") is not None:

@@ -67,7 +67,7 @@ from gui.explain import (  # noqa: E402
     receipt_summary,
     shorten,
 )
-from gui.theme import Theme  # noqa: E402
+from gui.theme import Theme, hand_cursor  # noqa: E402
 
 POLL_INTERVAL_MS = 50
 LAB_POLL_MS = 600
@@ -315,7 +315,7 @@ class ChatGUI(tk.Tk):
         def toggle(parent):
             self._pw_toggle = tk.Label(parent, text="Show", background=t.bg_input,
                                        foreground=t.accent, font=t.font("caption_bold"),
-                                       cursor="pointinghand")
+                                       cursor=hand_cursor())
             self._pw_toggle.bind("<Button-1>", lambda _e: self._toggle_password())
             return self._pw_toggle
         add_field("password", "Password", self.password_var, show="•", trailing=toggle)
@@ -324,7 +324,7 @@ class ChatGUI(tk.Tk):
         # one click away, and open by themselves if the port is invalid.
         self._server_open = False
         self.server_toggle = tk.Label(card, text="", background=t.bg_panel, foreground=t.fg_hint,
-                                      font=t.font("caption"), cursor="pointinghand", anchor="w")
+                                      font=t.font("caption"), cursor=hand_cursor(), anchor="w")
         self.server_toggle.grid(row=self._login_row, column=0, sticky="w", pady=(t.sp("xs"), 0))
         self.server_toggle.bind("<Button-1>", lambda _e: self._toggle_server_settings())
         self._form_groups.append(self.server_toggle)
@@ -700,7 +700,7 @@ class ChatGUI(tk.Tk):
         banner.pack(fill="x", padx=t.sp("md"), pady=(t.sp("sm"), 0))
         tk.Frame(banner, background=color, width=t.sp(4)).pack(side="left", fill="y")
         close = tk.Label(banner, text="✕", background=bg, foreground=t.fg_secondary,
-                         font=t.font("body_bold"), cursor="pointinghand", padx=t.sp("md"))
+                         font=t.font("body_bold"), cursor=hand_cursor(), padx=t.sp("md"))
         close.pack(side="right", anchor="n")
         close.bind("<Button-1>", lambda _e: self._dismiss_banner())
         body = tk.Frame(banner, background=bg, padx=t.sp("md"), pady=t.sp("sm"))
@@ -1025,7 +1025,7 @@ class ChatGUI(tk.Tk):
 
         if item["receipt"]:
             # Clicking a bubble opens its security receipt.
-            canvas.configure(cursor="pointinghand" if sys.platform == "darwin" else "hand2")
+            canvas.configure(cursor=hand_cursor())
             canvas.bind("<Button-1>", lambda _e, r=item["receipt"]: self._show_receipt(r))
         canvas.pack(side="right" if own else "left")
 

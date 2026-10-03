@@ -9,7 +9,7 @@ from tkinter import ttk
 import pytest
 
 from gui import theme as theme_module
-from gui.theme import SPACING, TYPE_SCALE, Theme, contrast_ratio
+from gui.theme import SPACING, TYPE_SCALE, Theme, contrast_ratio, is_no_display_error
 from gui.widgets import rescale_tree
 
 
@@ -18,7 +18,9 @@ def root():
     try:
         r = tk.Tk()
     except tk.TclError as exc:
-        pytest.skip(f"no display available for Tk: {exc}")
+        if is_no_display_error(exc):
+            pytest.skip(f"no display available for Tk: {exc}")
+        raise
     r.geometry("+10000+10000")
     r.update()  # macOS Tk can crash if a root is destroyed before it was ever updated
     yield r
@@ -81,7 +83,6 @@ def test_presentation_mode_scales_fonts_and_ttk_padding_by_25_percent(root):
     assert t.set_presentation(False) == pytest.approx(1 / 1.25)
     assert {r: t.font(r).cget("size") for r in TYPE_SCALE} == base
 
-
 def test_rescale_tree_scales_pack_and_grid_padding(root):
     outer = tk.Frame(root, padx=8, pady=4)
     outer.pack(padx=(4, 8), pady=10)
@@ -93,3 +94,53 @@ def test_rescale_tree_scales_pack_and_grid_padding(root):
     assert outer.pack_info()["padx"] == (5, 10) and outer.pack_info()["pady"] == 12
     assert inner.grid_info()["padx"] == (2, 8) and inner.grid_info()["pady"] == 10
     assert int(outer.cget("padx")) == 10
+
+
+# ---- cross-platform helpers (Issue 1, 2, 3) -----------------------------------------
+
+def test_hand_cursor_returns_pointinghand_on_darwin(monkeypatch):
+    from gui import theme as t
+    monkeypatch.setattr(t, "_IS_MAC", True)
+    assert t.hand_cursor() == "pointinghand"
+
+
+def test_hand_cursor_returns_hand2_off_darwin(monkeypatch):
+    from gui import theme as t
+    monkeypatch.setattr(t, "_IS_MAC", False)
+    assert t.hand_cursor() == "hand2"
+
+
+def test_hand_cursor_is_valid_on_this_platform(root):
+    """The cursor returned by hand_cursor() must be accepted by Tk on THIS OS."""
+    from gui.theme import hand_cursor
+    label = tk.Label(root, text="x", cursor=hand_cursor())
+    label.pack()
+    root.update()  # would raise TclError if the cursor was invalid
+
+
+def test_is_no_display_error_true_for_no_display():
+    from gui.theme import is_no_display_error
+    assert is_no_display_error(tk.TclError("no display name and no $DISPLAY environment variable"))
+    assert is_no_display_error(tk.TclError("couldn't connect to display \":0\""))
+
+
+def test_is_no_display_error_false_for_bad_cursor():
+    from gui.theme import is_no_display_error
+    assert not is_no_display_error(tk.TclError('bad cursor spec "pointinghand"'))
+    assert not is_no_display_error(tk.TclError("some other error"))
+
+
+def test_presentation_shortcut_uses_command_on_mac_control_elsewhere(monkeypatch):
+    from gui import widgets as w
+    monkeypatch.setattr(w, "_MAC", True)
+    assert w.PRESENTATION_ACCELERATOR == "⌘⇧P"
+    # The install function binds Command on mac
+    monkeypatch.setattr(w, "_MAC", False)
+    # PRESENTATION_ACCELERATOR is evaluated at import time; test install_presentation_shortcuts
+    calls = []
+    class FakeWindow:
+        def bind_all(self, seq, func):
+            calls.append(seq)
+    w.install_presentation_shortcuts(FakeWindow(), lambda: None)
+    assert any("Control" in c for c in calls)
+    assert not any("Command" in c for c in calls)

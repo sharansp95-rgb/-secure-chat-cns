@@ -10,6 +10,7 @@ import pytest
 
 import gui.security_dashboard as dashboard
 from gui.explain import compute_kpis, countdown, describe_log_event, lock_records, locked_accounts
+from gui.theme import is_no_display_error
 
 NOW = 1_800_000_000.0
 
@@ -91,7 +92,9 @@ def make(tmp_path):
         try:
             window = dashboard.SecurityDashboard(log_path=str(log))
         except tk.TclError as exc:
-            pytest.skip(f"no display available for Tk: {exc}")
+            if is_no_display_error(exc):
+                pytest.skip(f"no display available for Tk: {exc}")
+            raise
         windows.append(window)
         window.geometry(geometry)
         window.update()

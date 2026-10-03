@@ -10,6 +10,7 @@ import pytest
 
 import gui.chat_gui as chat_gui
 from gui.chat_gui import validate_login_form
+from gui.theme import is_no_display_error
 
 
 @pytest.fixture()
@@ -17,7 +18,9 @@ def app():
     try:
         window = chat_gui.ChatGUI()
     except tk.TclError as exc:
-        pytest.skip(f"no display available for Tk: {exc}")
+        if is_no_display_error(exc):
+            pytest.skip(f"no display available for Tk: {exc}")
+        raise
     window.geometry("780x540+10000+10000")
     window.update()
     yield window
@@ -63,7 +66,7 @@ def test_enter_submits_when_all_fields_are_filled_otherwise_moves_on(app):
     app._start_auth = lambda mode: calls.append(mode)
     entries = [app._fields[k].entry for k in ("username", "peer", "password")]
     app.username_var.set("alice")
-    entries[0].focus_force(); app.update()
+    entries[0].focus_set(); app.update()
     entries[0].event_generate("<Return>"); app.update()
     assert calls == [] and app.focus_get() is entries[1], "Enter should move to the next empty field"
     app.peer_var.set("bob"); app.password_var.set("pw")

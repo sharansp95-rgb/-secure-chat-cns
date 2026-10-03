@@ -10,6 +10,7 @@ import pytest
 
 import gui.chat_gui as chat_gui
 from gui.explain import receipt_details, receipt_rows, receipt_summary, shorten
+from gui.theme import is_no_display_error
 
 FULL_HASH = "48564a5d663e0cbc9219" + "ab" * 22
 RECEIVED = {"direction": "received", "sender": "bob", "sender_fingerprint": "8860 7244 2628 167C",
@@ -64,7 +65,9 @@ def app():
     try:
         window = chat_gui.ChatGUI()
     except tk.TclError as exc:
-        pytest.skip(f"no display available for Tk: {exc}")
+        if is_no_display_error(exc):
+            pytest.skip(f"no display available for Tk: {exc}")
+        raise
     window.geometry("1040x660+10000+10000")
     window.update()
     yield window

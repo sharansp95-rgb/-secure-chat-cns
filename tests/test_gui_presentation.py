@@ -12,7 +12,7 @@ import pytest
 import gui.chat_gui as chat_gui
 import gui.security_dashboard as dashboard
 from gui import widgets
-from gui.theme import TYPE_SCALE
+from gui.theme import TYPE_SCALE, is_no_display_error
 
 AUTH = {"username": "alice", "peer": "bob", "lab_mode": True,
         "own_fingerprint": "AAAA BBBB CCCC DDDD", "peer_key_found": True}
@@ -31,7 +31,9 @@ def chat(tmp_path):
     try:
         window = chat_gui.ChatGUI(log_path=str(tmp_path / "e.jsonl"))
     except tk.TclError as exc:
-        pytest.skip(f"no display available for Tk: {exc}")
+        if is_no_display_error(exc):
+            pytest.skip(f"no display available for Tk: {exc}")
+        raise
     window.geometry("1040x660+10000+10000")
     window.update()
     window.client, window.username, window.peer = FakeClient(), "alice", "bob"
@@ -53,7 +55,9 @@ def dash(tmp_path):
     try:
         window = dashboard.SecurityDashboard(log_path=str(tmp_path / "e.jsonl"))
     except tk.TclError as exc:
-        pytest.skip(f"no display available for Tk: {exc}")
+        if is_no_display_error(exc):
+            pytest.skip(f"no display available for Tk: {exc}")
+        raise
     window.geometry("920x620+10000+10000")
     window.update()
     yield window

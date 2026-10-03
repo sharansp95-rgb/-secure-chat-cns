@@ -13,6 +13,7 @@ import tkinter as tk
 import pytest
 
 import gui.chat_gui as chat_gui
+from gui.theme import is_no_display_error
 
 
 @pytest.fixture()
@@ -20,7 +21,9 @@ def app():
     try:
         window = chat_gui.ChatGUI()
     except tk.TclError as exc:
-        pytest.skip(f"no display available for Tk: {exc}")
+        if is_no_display_error(exc):
+            pytest.skip(f"no display available for Tk: {exc}")
+        raise
     window.geometry("+10000+10000")  # realize it far off-screen, never flashing
     window.update()
     yield window
@@ -90,7 +93,9 @@ def test_dashboard_shows_a_short_relative_log_path():
     try:
         window = dashboard.SecurityDashboard()
     except tk.TclError as exc:
-        pytest.skip(f"no display available for Tk: {exc}")
+        if is_no_display_error(exc):
+            pytest.skip(f"no display available for Tk: {exc}")
+        raise
     try:
         window.geometry("+10000+10000")
         window.update()
@@ -112,7 +117,9 @@ def test_dashboard_locked_account_text_wraps_instead_of_being_clipped(tmp_path):
     try:
         window = dashboard.SecurityDashboard(log_path=str(log))
     except tk.TclError as exc:
-        pytest.skip(f"no display available for Tk: {exc}")
+        if is_no_display_error(exc):
+            pytest.skip(f"no display available for Tk: {exc}")
+        raise
     try:
         window.geometry("+10000+10000")
         window.update()  # runs the first poll, which renders the locked account
@@ -133,7 +140,9 @@ def test_dashboard_header_and_locked_pane_fit_at_the_launcher_width():
     try:
         window = dashboard.SecurityDashboard()  # default log path: shown relative to the project
     except tk.TclError as exc:
-        pytest.skip(f"no display available for Tk: {exc}")
+        if is_no_display_error(exc):
+            pytest.skip(f"no display available for Tk: {exc}")
+        raise
     try:
         window.geometry("700x430+10000+10000")
         window.update()

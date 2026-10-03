@@ -9,6 +9,8 @@ import sys
 import tkinter as tk
 from tkinter import ttk
 
+from gui.theme import hand_cursor
+
 # ---------------------------------------------------------------------------------
 # Presentation-mode helpers
 # ---------------------------------------------------------------------------------
@@ -167,7 +169,7 @@ class Chip(tk.Label):
         self.kind = None
         self.set(kind, text)
         if command:
-            self.configure(cursor="pointinghand")
+            self.configure(cursor=hand_cursor())
             self.bind("<Button-1>", lambda _e: command())
 
     def set(self, kind, text=None):
@@ -330,7 +332,7 @@ def flat_button(parent, theme, text, command, kind="secondary", **kw):
     parent_bg = kw.pop("background", None) or parent.cget("background")
     label = tk.Label(parent, text=text, background=bg or parent_bg, foreground=fg,
                      font=theme.font("caption_bold"), padx=theme.sp("sm"), pady=2,
-                     cursor="pointinghand", **kw)
+                     cursor=hand_cursor(), **kw)
     label.bind("<Button-1>", lambda _e: command())
     hover = theme.bg_raised if kind == "ghost" else "#2a3646"
     label.bind("<Enter>", lambda _e: label.configure(background=hover))
